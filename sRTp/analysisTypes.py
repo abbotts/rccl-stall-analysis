@@ -14,8 +14,14 @@ class Operation:
         self.comm = comm
         self.progress_tid = None
         self.channels = []  # List of channels this operation is monitoring
+        self.duration = None  # Duration of the operation, if applicable
+        self._start_time = None  # Start time of the operation, if applicable
     def __repr__(self):
-        return f"Operation(type={self.op_type}, seq_num={self.seq_num}, status={self.status})"
+        if self.duration > 0:
+            duration_str = f"{self.duration * 1000} ms"
+        else:
+            duration_str = "unknown duration"
+        return f"Operation(type={self.op_type}, seq_num={self.seq_num}, status={self.status}, duration={duration_str})"
     def complete(self):
         """Mark the operation as complete."""
         self.status = 'completed'
@@ -25,7 +31,7 @@ class Operation:
     def getOperationType(self):
         """Get the type of the operation."""
         return self.op_type
-    def start_kernel(self, tid:int, channel_id:str):
+    def start_kernel(self, tid:int, channel_id:str, timestamp=None):
         """Log running kernels on running channels"""
         if self.progress_tid is None:
             self.progress_tid = tid
@@ -35,7 +41,9 @@ class Operation:
         if channel_id in self.channels:
             raise ValueError("Channel ID already in operation channels.")
         self.channels.append(channel_id)
-    def end_kernel(self, tid:int, channel_id:str):
+        if self._start_time is None and timestamp is not None:
+            self._start_time = float(timestamp)
+    def end_kernel(self, tid:int, channel_id:str, timestamp=None):
         """End kernels on channels"""
         if self.progress_tid != tid:
             raise ValueError("Operation progress thread ID does not match the ending thread ID.")
@@ -43,6 +51,8 @@ class Operation:
             raise ValueError("Channel ID not found in operation channels.")
         self.channels.remove(channel_id)
         if self.channels == []:
+            if self._start_time is not None and timestamp is not None:
+                self.duration = float(timestamp) - self._start_time
             # If no channels are left, mark the operation as complete
             self.complete()
         
@@ -101,7 +111,7 @@ class localComm:
             self.complete_operation_by_match(op_type, seq_num)
 
     # For now a channel ID is a string, but once Arm can remind me what they mean, I can make this a more complex type
-    def start_kernel_if_match(self, opType:str, tid:str, channel_id:str):
+    def start_kernel_if_match(self, opType:str, tid:str, channel_id:str, timestamp=None):
         """If the kernel matches an operation on this communicator, start it and return true.
         Otherwise, return false.
         Inputs to this function are all strings for now, and type conversions will be done later.
@@ -115,13 +125,13 @@ class localComm:
             # Here I assume that there will be only one thread watching progress on a given operation
             # If there are multiple threads this will raise an exception
             if operation.getOperationType() == opType:
-                operation.start_kernel(int(tid), channel_id)
+                operation.start_kernel(int(tid), channel_id, timestamp)
                 kstarted = True
             else:
                 print(f"Operation {operation.getOperationType()} does not match {opType}, skipping.")
         return kstarted
 
-    def end_kernel_if_match(self, tid, channel_id):
+    def end_kernel_if_match(self, tid, channel_id, timestamp=None):
         """If the kernel matches an operation on this communicator, end it and return true.
         Otherwise, return false."""
         kend = False
@@ -129,7 +139,7 @@ class localComm:
             if kend:
                 raise ValueError("Multiple pending operations using the same tid and channel_id on the same communicator.")
             if operation.progress_tid == int(tid) and channel_id in operation.channels:
-                operation.end_kernel(int(tid), channel_id)
+                operation.end_kernel(int(tid), channel_id, timestamp)
                 kend = True
             if operation.is_complete():
                 self.complete_operation(operation)
@@ -161,18 +171,66 @@ class globalComm:
     
     This class is a container for multiple local communicators and provides methods to manage operations across them.
     """
-    def __init__(self, commId: str):
+    def __init__(self, commId: str, size: int):
         self.commId = commId
-        self.local_communicators = []  # List of localComm objects
-        self.global_rank_map = {}  # Maps global rank to local communicator and local rank
+        # A list of local communicators preallocated to size
+        self.local_communicators = [None] * size  # Ordered list of localComm objects
+        # I suspect we'll go back and forth between local and global ranks a lot, so let's keep
+        # a map for both directions
+        self.local_to_global_rank_map = {}  # Maps local rank to global rank
+        self.global_to_local_rank_map = {}  # Maps global rank to local rank
 
-    def add_local_communicator(self, local_comm: localComm):
+    def add_local_communicator(self, local_comm: localComm, global_rank: int):
         """Add a local communicator to the global communicator."""
-        self.local_communicators.append(local_comm)
+        self.local_communicators[local_comm.localId] = local_comm
         # Update the global rank map
-        for rank in range(local_comm.size):
-            self.global_rank_map[rank] = (local_comm, rank)
+        self.local_to_global_rank_map[local_comm.localRank] = global_rank
+        self.global_to_local_rank_map[global_rank] = local_comm.localRank
 
-    def get_local_communicator(self, global_rank: int):
-        """Get the local communicator and local rank for a given global rank."""
-        return self.global_rank_map.get(global_rank, None)
+    def get_local_communicator(self, local_rank: int) -> localComm:
+        """Get the local communicator for a given local rank."""
+        return self.local_communicators[local_rank]
+    
+    def comm_record_complete(self) -> bool:
+        """Returns True if there is a local comm object for every rank in the communicator.
+        
+        If this is False then either a communicator is missing from a log or it was called too soon.
+        """
+        return None not in self.local_communicators
+
+    def get_pending_opcounts(self) -> np.ndarray:
+        """Get the  number of pending operations across all local communicators as a numpy array."""
+        if not self.comm_record_complete():
+            raise ValueError("Communicator is not fully populated with local communicators.")
+        return np.array([len(comm.pending_operations) for comm in self.local_communicators])
+
+    def get_completed_opcounts(self) -> np.ndarray:
+        """Get the number of completed operations across all local communicators as a numpy array."""
+        if not self.comm_record_complete():
+            raise ValueError("Communicator is not fully populated with local communicators.")
+        return np.array([len(comm.completed_operations) for comm in self.local_communicators])
+    
+    def same_completed_opcounts(self) -> bool:
+        """Check if all local communicators have the same number of completed operations."""
+        if not self.comm_record_complete():
+            raise ValueError("Communicator is not fully populated with local communicators.")
+        completed_counts = self.get_completed_opcounts()
+        return np.all(completed_counts == completed_counts[0])
+
+    def get_completed_durations(self, fillMissing: bool = False) -> np.ndarray:
+        """Get the durations of completed operations across all local communicators as a numpy array.
+        Time units are in milliseconds.
+        
+        If fillMissing is True, it will fill missing durations with NaN.
+        """
+
+        if not fillMissing and not self.same_completed_opcounts():
+            raise ValueError("Not all local communicators have the same number of completed operations. Try fillMissing=True.")
+
+        rval = np.empty((len(self.local_communicators), max(self.get_completed_opcounts())))
+        rval.fill(np.nan)  # Fill with NaN for missing durations
+
+        for i, comm in enumerate(self.local_communicators):
+            for j, op in enumerate(comm.completed_operations):
+                if op.duration is not None:
+                    rval[i, j] = op.duration * 1000

@@ -1,6 +1,6 @@
 #! /usr/bin/env python3
 
-import analysisTypes
+import sRTp.analysisTypes as analysisTypes
 import parse
 
 initPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRank comm {localcomm} rank {rank} nranks {size} cudaDev {cudadev} nvmlDev {nvmldev} busId {busid} commId {globalcomm} - Init START")
@@ -83,7 +83,7 @@ def process_rank_file(rank_file):
                                 if launchLogged:
                                     raise ValueError("Ambiguous kernel launch: multiple communicators have ops of this type and size pending.")
                                 # Start the kernel operation if it matches an operation on this communicator
-                                if comm.start_kernel_if_match(r['func'], r['tid'], r['channelid']):
+                                if comm.start_kernel_if_match(r['func'], r['tid'], r['channelid'], r['timestamp']):
                                     launchLogged = True
                                     continue
                 if not launchLogged:
@@ -99,7 +99,7 @@ def process_rank_file(rank_file):
                         for operation in comm.pending_operations:
                             # The end kernel logging doesn't give optype or size, so we have to go by
                             # tid and channelid alone
-                            if comm.end_kernel_if_match(r['tid'], r['channelid']):
+                            if comm.end_kernel_if_match(r['tid'], r['channelid'], r['timestamp']):
                                 if endLogged:
                                     raise ValueError("Ambiguous kernel end: multiple communicators have ops of this type and size pending.")
                                 endLogged = True
@@ -133,7 +133,7 @@ def main():
         if len(comm.completed_operations) == 0:
             print("\tNo completed operations.")
         for completed_op in comm.completed_operations:
-            print(f"\tCompleted Operation: {completed_op.op_type} Seq Num: {completed_op.seq_num}")
+            print(f"\tCompleted Operation: {completed_op.op_type} Seq Num: {completed_op.seq_num} Duration: {completed_op.duration if completed_op.duration is not None else 'unknown'}")
 
 
 if __name__ == "__main__":
