@@ -2,12 +2,16 @@
 
 import sRTp.analysisTypes as analysisTypes
 import parse
+import sys
 
 initPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRank comm {localcomm} rank {rank} nranks {size} cudaDev {cudadev} nvmlDev {nvmldev} busId {busid} commId {globalcomm} - Init START")
 initCompletePattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRank comm {localcomm} rank {rank} nranks {size} cudaDev {cudadev} nvmlDev {nvmldev} busId {busid} commId {globalcomm} localSize {localsize} used {usedbytes} bytes on core {core} - Init COMPLETE")
 opLaunchPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO {op}: opCount {opcount} sendbuff {sendbuff} recvbuff {recvbuff} count {count} datatype {datatype} op {opnum} root {root} comm {comm} [nranks={nranks}] stream {stream} task {task} globalrank {globalrank}")
 kernelLaunchPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} ncclDevFunc_{func}_{type}_{dtype} nw {nw} bi {bi} nc {nc} root {root} busId {busid} nRanks {nranks}")
 kernelEndPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE busId {busid} nRanks {nranks}")
+ipcPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] via P2P/IPC comm {comm} nRanks {nranks}")
+ofiPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] [{direction}] via NET/AWS Libfabric/{ofi_details} comm {comm} nRanks {nranks}")
+proxyPattern = parse.compile("{proxy} coll:{collid} comm:{comm} [{direction}] dtype:{dtype} redOp:{redop} proto:{proto}  nb:{nb} ns:{ns} p:{p} t:{t} r:{r}, d:{d}   myrank:{myrank} peer:{peer} chan:{chan} tail:{tail} recvtail:{recvtail} reg:{reg} connSz:{connsz}(retries:{retries})]")
 
 def process_rank_file(rank_file):
     """
@@ -36,17 +40,45 @@ def process_rank_file(rank_file):
                 continue
             
             # Channel lines look like this:
-            # frontier00061:695135:695311 [0] NCCL INFO Channel 00/08 :    0   3   1   2   6   5   7   4   8  11   9  10  14  13  15  12  16  19  17  18
             # frontier00061:695135:695311 [0] NCCL INFO Channel 03/0 : 0[d6000] -> 2[de000] via P2P/IPC comm 0x9bbf3b0 nRanks 4096
             # frontier00061:695135:695311 [0] NCCL INFO Channel 00/0 : 4092[d6000] -> 0[d6000] [receive] via NET/AWS Libfabric/2/GDRDMA comm 0x9bbf3b0 nRanks 4096
             if commOpening and "Channel" in line:
                 for comm in communicators:
                     if comm.localId == commOpening:
+                        # Rings get connected first, then trees
+                        algo = "Ring"
+                        if comm.rings_connected:
+                            algo = "Tree"
+
                         # Here we would parse the channel information and add it to the communicator
-                        # For now, we just store the channel log strip
-                        comm.add_channel(line.strip())
+                        if "P2P/IPC" in line:
+                            channel_info = ipcPattern.parse(line.strip())
+                            # IPC channels are always self to peer, so just grab the dst
+                            comm.add_peer_to_channel(int(channel_info['channelid']), int(channel_info['dst']), 'both', 'IPC', algo=algo)
+                        elif "NET/AWS Libfabric" in line:
+                            channel_info = ofiPattern.parse(line.strip())
+                            #print(line.strip())
+                            #print(channel_info)
+                            if channel_info['direction'] == 'send':
+                                comm.add_peer_to_channel(int(channel_info['channelid']), int(channel_info['dst']), 'send', 'OFI', algo=algo)
+                            elif channel_info['direction'] == 'receive':
+                                comm.add_peer_to_channel(int(channel_info['channelid']), int(channel_info['src']), 'receive', 'OFI', algo=algo)
+
                         continue
 
+            # Playing fast and loose here.. there's a risk of channels being printed for overlapping communicators, so we mark rings and trees constructed when we see
+            # the message. No other way to do it at the moment.
+            if "Connected all rings" in line:
+                for comm in communicators:
+                    if comm.localId == commOpening:
+                        comm.finish_rings()
+                        continue
+            if "Connected all trees" in line:
+                for comm in communicators:
+                    if comm.localId == commOpening:
+                        comm.finish_trees()
+                        continue
+            
             # Comm Init Complete Lines look like this:
             # frontier00061:695135:695311 [0] NCCL INFO ncclCommInitRank comm 0x9bbf3b0 rank 0 nranks 4096 cudaDev 0 nvmlDev 5 busId d6000 commId 0xbc8a3ad231751b7 localSize 304 used 227459488 bytes on core 13 - Init COMPLETE
             if "Init COMPLETE" in line:
@@ -63,13 +95,28 @@ def process_rank_file(rank_file):
             # Operation starts look like this:
             # frontier00061:695135:695135 [0] NCCL INFO AllGather: opCount 2 sendbuff 0x7ffc62d00000 recvbuff 0x7ff887600000 count 131072 datatype 9 op 0 root 0 comm 0x9bbf3b0 [nranks=4096] stream 0x90013c0 task 0 globalrank 0
             if "opCount" in line and "comm" in line:
+                opRecorded = False
                 r = opLaunchPattern.parse(line.strip())
-                for comm in communicators:
-                    # NCCL communicators are identified by their localId
-                    if comm.localId == r['comm']:
-                        # Start the operation on the communicator
-                        comm.start_operation(r['op'], r['opcount'])
-                        continue
+                try:
+                    for comm in communicators:
+                        # NCCL communicators are identified by their localId
+                        if comm.localId == r['comm']:
+                            # Start the operation on the communicator
+                            comm.start_operation(r['op'], r['opcount'], r['count'], r['datatype'])
+                            opRecorded = True
+                            continue
+                except Exception as e:
+                    # Handle parsing errors or other exceptions
+                    print(f"Error processing operation start: {line.strip()}")
+                    print(e)
+                    raise e
+                
+                if not opRecorded:
+                    print(f"Bad line: {line.strip()}", file=sys.stderr)
+                    print("Operation didn't start on any communicators.", file=sys.stderr)
+                    for comm in communicators:
+                        print(f"Communicator {comm.commId}, size {comm.size} has {len(comm.pending_operations)} pending operations.")
+                    raise ValueError(f"Operation start for {r['op']} with size {r['nranks']} did not match any communicators.")
             
             # Kernel launches look like this:
             # frontier00061:695135:695318 [0] NCCL INFO ## [442464.629746] [00:00:00] 000000 KL HWID 42302510 ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 nw 4 bi 0 nc 8 root 0 busId d6000 nRanks 4096
@@ -82,11 +129,17 @@ def process_rank_file(rank_file):
                             if operation.getOperationType() == r['func']:
                                 if launchLogged:
                                     raise ValueError("Ambiguous kernel launch: multiple communicators have ops of this type and size pending.")
+                            
                                 # Start the kernel operation if it matches an operation on this communicator
                                 if comm.start_kernel_if_match(r['func'], r['tid'], r['channelid'], r['timestamp']):
                                     launchLogged = True
                                     continue
                 if not launchLogged:
+                    print(f"Bad line: {line}", file=sys.stderr)
+                    for comm in communicators:
+                        print(f"Communicator {comm.commId}, size {comm.size} has {len(comm.pending_operations)} pending operations.")
+                        for op in comm.pending_operations:
+                            print(f"\tPending Operation: {op.op_type} Seq Num: {op.seq_num}")
                     raise ValueError(f"Kernel launch for {r['func']} with size {r['nranks']} did not match any pending operations.")
 
             #kernel end lines look like this:
@@ -99,14 +152,27 @@ def process_rank_file(rank_file):
                         for operation in comm.pending_operations:
                             # The end kernel logging doesn't give optype or size, so we have to go by
                             # tid and channelid alone
-                            if comm.end_kernel_if_match(r['tid'], r['channelid'], r['timestamp']):
-                                if endLogged:
-                                    raise ValueError("Ambiguous kernel end: multiple communicators have ops of this type and size pending.")
-                                endLogged = True
-                                continue
+                            try:
+                                if comm.end_kernel_if_match(r['tid'], r['channelid'], r['timestamp']):
+                                    if endLogged:
+                                        raise ValueError("Ambiguous kernel end: multiple communicators have ops of this type and size pending.")
+                                    endLogged = True
+                                    continue
+                            except Exception as e:
+                                print("Error ending kernel operation on line:")
+                                print(line.strip())
+                                raise e
 
-
-
+            # A proxy print looks like this:
+            # 0x7ff5ee771d48 [0-1|0| coll:3 comm:0x1b885440 [SEND] dtype:9 redOp:0 proto:2  nb:1048576 ns:16380 p:4436 t:4428 r:0, d:4428   myrank:6 peer:10 chan:1 tail:4428 recvtail:4428 reg:0 connSz:-1(retries:265446404)]
+            if "recvtail" in line and "myrank" in line:
+                r = proxyPattern.parse(line.strip())
+                #print(line.strip())
+                #print(r)
+                for comm in communicators:
+                    if comm.localId == r['comm']:
+                        comm.add_proxy_print(int(r['peer']), int(r['chan']), r['direction'], int(r['tail']), int(r['recvtail']), int(r['retries']), int(r['collid']), int(r['dtype']), int(r['redop']), int(r['proto']), int(r['nb']), int(r['ns']), int(r['p']), int(r['t']), int(r['r']), int(r['d']))
+                        continue
 
     return communicators
 
@@ -134,6 +200,7 @@ def main():
             print("\tNo completed operations.")
         for completed_op in comm.completed_operations:
             print(f"\tCompleted Operation: {completed_op.op_type} Seq Num: {completed_op.seq_num} Duration: {completed_op.duration if completed_op.duration is not None else 'unknown'}")
+        print(f"\tProxy Stalls: {comm.get_proxy_stall_count()}")
 
 
 if __name__ == "__main__":

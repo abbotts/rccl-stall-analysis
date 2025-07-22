@@ -2,23 +2,132 @@
 
 import numpy as np
 
-# This class descripts an operational
+
+# This class describes a channel that we will follow for debugging.
+# It needs to track information to identify the channel in output logs,
+# such as the channel ID, the NCCL communicator it is associated with,
+# whether it is run or key, and what it's monitoring.
+
+# frontier00061:695135:695522 [0] NCCL INFO ## [442509.637772] [00:00:00] 000000 KL HWID 42302610 ncclDevFunc_ReduceScatter_RING_SIMPLE_Sum_bf16 nw 4 bi 0 nc 8 root 0 busId d6000 nRanks 4096
+# Decoding: [00:00:00] - [rank on communicator:blockid:threadid] - in RCCL, blockId and threadId are the same [and will map directly to channels for this run, but not always]
+# Look at channel informtion preceeding this line to see what the channel is doing
+# frontier00061:695135:695521 [0] NCCL INFO Connected all rings
+# Each channel represents one ring
+
+class ProxyStall:
+    """A class representing a proxy stall in the channel.
+    
+    This simple little class holds information about stalled communication in a channel across the fabric
+    We'll associate these with specific operations, not with specific channels, so we can trace the communication
+    in an operation that is stalled.
+    """
+    def __init__(self, channel_id: str, peer: int, direction: str, tail: int, recvtail: int, retries: int, collid: int, dtype: int, redop: int, protocol: int, nb: int, ns: int, p: int, t: int, r: int, d: int):
+        self.channel_id = channel_id  # The ID of the channel where the stall occurred
+        self.peer = peer # The peer we were talking to
+        self.direction = direction # send or receive
+        self.tail = tail # Number of messages sent
+        self.recvtail = recvtail # Number of messages received
+        self.retries = retries # Times we've retried this operation
+        self.collid = collid # What collective we're doing (some enum)
+        self.dtype = dtype # Data type of the operation (some enum)
+        self.redop = redop # Operation type (some enum)
+        self.protocol = protocol # Protocol used (some enum)
+        self.nb = nb # Maybe number of bytes (ask Arm or check source)
+        self.ns = ns # Maybe Number of sends (ask Arm or check source)
+        self.p = p # Maybe total packets (ask Arm or check source)
+        self.t = t # Maybe number of transmitted packets (ask Arm or check source)
+        self.r = r # No clue what this is, ask Arm or check source
+        self.d = d # no clue what this is, ask Arm or check source
+        # This tracks if we have traced this stall or not
+        self.traced = False
+
+class DTStall:
+    # This represents a print from the kernel associated with a channel saying it is stalled
+    """A class representing a data transfer stall in the channel.
+
+    Attributes:
+        channel_id (str): The ID of the channel where the stall occurred.
+        timestamp (float): The timestamp when the stall was detected.
+        content (str): The content of the stall message.
+    """
+    def __init__(self, channel_id: str, timestamp: float, content: str):
+        self.channel_id = channel_id
+        self.timestamp = timestamp
+        self.content = content
+        # For all the cases we have now, this should be identical to the channel_id
+        self.block_number = channel_id.split(':')[1]  # Extract the block number from the channel ID
+    def __repr__(self):
+        return f"DTStall(channel_id={self.channel_id}, timestamp={self.timestamp}, content={self.content})"
+    def get_block_number(self):
+        """Get the block number from the channel ID."""
+        return self.block_number
+
+# A channel can look like this:
+# frontier00061:695135:695311 [0] NCCL INFO Channel 00/0 : 0[d6000] -> 3[c6000] via P2P/IPC comm 0x9bbf3b0 nRanks 4096
+# frontier00061:695135:695311 [0] NCCL INFO Channel 00/0 : 4092[d6000] -> 0[d6000] [receive] via NET/AWS Libfabric/2/GDRDMA comm 0x9bbf3b0 nRanks 4096
+
+class Peer:
+    def __init__(self, peer_id: int, peer_type: str, peer_direction: str):
+        '''
+        A class representing a peer in a channel.         
+        peer_direction can be 'send', 'receive', or 'both'
+        peer_type can be 'IPC', 'OFI', or other types as needed
+        '''
+        self.peer_id = peer_id
+        self.peer_type = peer_type
+        if peer_type not in ['IPC', 'OFI']:
+            raise ValueError("peer_type must be 'IPC' or 'OFI'.")
+        if peer_direction not in ['send', 'receive', 'both']:
+            raise ValueError("peer_direction must be 'send', 'receive', or 'both'.")
+        self.peer_direction = peer_direction
+    def __repr__(self):
+        return f"Peer(id={self.peer_id}, type={self.peer_type}, direction={self.peer_direction})"
+
+class Channel:
+    def __init__(self, channel_num: int, comm):
+        self.channel_num = channel_num  # At this low level we should know the unique number each channel has, this will be the block number
+        self.comm = comm  # The local NCCL communicator this channel is associated with
+        self.peers = []  # List of peers in this channel
+    def __repr__(self):
+        return f"Channel(num={self.channel_num}, comm={self.comm.commId}, peers={self.peers})"
+    def add_peer(self, peer_id: int, direction: str, peer_type: str):
+        """Add a peer to the channel.
+        
+        Args:
+            peer_id (int): The ID of the peer.
+            direction (str): 'send', 'receive', or 'both'.
+            peer_type (str): The type of connection (e.g., 'IPC', 'OFI').
+        """
+        self.peers.append(Peer(peer_id, peer_type, direction))
+
+
+
+# This class describes an operation
 # it needs to track the operation type, sequence number, start time, end time, and completion status
 # it should also track the NCCL communicator it is associated with
 
 class Operation:
-    def __init__(self, op_type:str, seq_num:int, comm):
+    def __init__(self, op_type:str, seq_num:int, count:int, dtype:int, comm, algorithm="Ring"):
         self.op_type = op_type
         self.seq_num = seq_num
+        self.count = count
+        self.dtype = dtype
         self.status = None
         self.comm = comm
         self.progress_tid = None
         self.channels = []  # List of channels this operation is monitoring
         self.duration = None  # Duration of the operation, if applicable
         self._start_time = None  # Start time of the operation, if applicable
+        self._end_time = None  # End time of the operation, if applicable
+        self.expected_kernels = 8  # Expected kernels for this operation, if applicable
+        if self.comm.size == 1:
+            self.expected_kernels = 0
+        self.algorithm = algorithm  # Algorithm used for the operation, default is "Ring"
+        self.proxy_stalls = []  # List of proxy stalls associated with this operation instance
+        self.dt_stalls = []  # List of data transfer stalls associated with this operation instance
     def __repr__(self):
         if self.duration > 0:
-            duration_str = f"{self.duration * 1000} ms"
+            duration_str = f"{self.duration} ms"
         else:
             duration_str = "unknown duration"
         return f"Operation(type={self.op_type}, seq_num={self.seq_num}, status={self.status}, duration={duration_str})"
@@ -41,8 +150,12 @@ class Operation:
         if channel_id in self.channels:
             raise ValueError("Channel ID already in operation channels.")
         self.channels.append(channel_id)
-        if self._start_time is None and timestamp is not None:
-            self._start_time = float(timestamp)
+        self.expected_kernels -= 1
+        if timestamp is not None:
+            if self._start_time is None:
+                self._start_time = float(timestamp)
+            else:
+                self._start_time = min(self._start_time, float(timestamp))
     def end_kernel(self, tid:int, channel_id:str, timestamp=None):
         """End kernels on channels"""
         if self.progress_tid != tid:
@@ -50,12 +163,31 @@ class Operation:
         if channel_id not in self.channels:
             raise ValueError("Channel ID not found in operation channels.")
         self.channels.remove(channel_id)
-        if self.channels == []:
-            if self._start_time is not None and timestamp is not None:
-                self.duration = float(timestamp) - self._start_time
+        if self._start_time is not None and timestamp is not None:
+            if self._end_time is None:
+                self._end_time = float(timestamp)
+            else:
+                self._end_time = max(self._end_time, float(timestamp))
+        if self.channels == [] and self.expected_kernels == 0:
+            if self._start_time is not None and self._end_time is not None:
+                self.duration = (self._end_time - self._start_time) * 1000.0
             # If no channels are left, mark the operation as complete
             self.complete()
+    def add_proxy_stall(self, proxy_stall: ProxyStall):
+        """Add a proxy stall to the operation.
         
+        Args:
+            proxy_stall (ProxyStall): The proxy stall to add.
+        """
+        self.proxy_stalls.append(proxy_stall)
+
+    def add_dt_stall(self, dt_stall: DTStall):
+        """Add a data transfer stall to the operation.
+        
+        Args:
+            dt_stall (DTStall): The data transfer stall to add.
+        """
+        self.dt_stalls.append(dt_stall)
 
 # This type describes a NCCL communicator object
 # We should track the global commId, local rank, size, busID
@@ -82,8 +214,11 @@ class localComm:
         channels (list): A list of channels this communicator is monitoring. Currently just strings.
         pending_operations (list): A list of operations that are pending. Type is Operation.
         completed_operations (list): A list of operations that have been completed. Type is Operation.
+
+        For now we assume 8 channels per communicator, but this may change in the future.
+        nchannels (int): The number of channels this communicator has, default is 8.
     """
-    def __init__(self, nodeId, commId, localId, localRank, size, busID, cudaDev, nvmlDev):
+    def __init__(self, nodeId, commId, localId, localRank, size, busID, cudaDev, nvmlDev, nchannels=8):
         self.nodeId = nodeId
         self.commId = commId
         self.localId = localId
@@ -92,20 +227,47 @@ class localComm:
         self.busID = busID
         self.cudaDev = cudaDev
         self.nvmlDev = nvmlDev
-        self.channels = []  # List of channels this communicator is monitoring
+        self.ring_channels = []  # List of channels this communicator uses
+        self.rings_connected = False  # Whether all rings are connected
+        self.tree_connected = False  # Whether all tree channels are connected
+        self.tree_channels = []  # List of tree channels this communicator uses
+        if self.size > 1:
+            self.ring_channels = [ Channel(i, self) for i in range(nchannels) ]  # Preallocate 8 channels for ring operations
+            self.tree_channels = [ Channel(i, self) for i in range(nchannels) ]  # Preallocate 8 channels for tree operations
         self.pending_operations = []  # List of operations that are pending
         self.completed_operations = []  # List of operations that have been completed
+        self.proxy_stall_count = 0  # Count of proxy stalls associated with this communicator
 
-    # Right now a channel is just a string, but it should become a type in the future
-    # I just don't know what the strings actually mean (need to bug )
-    def add_channel(self, channel: str):
-        """Add a channel to the communicator."""
-        self.channels.append(channel)
+    def add_peer_to_channel(self, channel_num: int, peer_id: int, direction: str, peer_type: str, algo: str = "Ring"):
+        """Add a peer to a channel in this communicator.
+        
+        Args:
+            channel_num (int): The channel number to add the peer to.
+            peer_id (int): The ID of the peer.
+            direction (str): 'send' or 'receive'.
+            peer_type (str): The type of connection (e.g., 'IPC', 'OFI').
+        """
+        if channel_num < 0 or channel_num >= len(self.ring_channels):
+            raise ValueError("Channel number out of range.")
+        if algo == "Ring":
+            self.ring_channels[channel_num].add_peer(peer_id, direction, peer_type)
+        elif algo == "Tree":
+            self.tree_channels[channel_num].add_peer(peer_id, direction, peer_type)
+        else:
+            raise ValueError("Unknown algorithm.")
 
-    def start_operation(self, op_type, seq_num):
+    def finish_rings(self):
+        """Mark all ring channels as connected."""
+        self.rings_connected = True
+
+    def finish_trees(self):
+        """Mark all tree channels as connected."""
+        self.tree_connected = True
+
+    def start_operation(self, op_type, seq_num, count, dtype):
         """Start an operation on this communicator."""
         # This could be a more complex structure to track operations
-        self.pending_operations.append(Operation(op_type, int(seq_num, 16), self))
+        self.pending_operations.append(Operation(op_type, int(seq_num, 16), int(count), int(dtype), self))
         if self.size == 1:
             # If the communicator size is 1, we can immediately complete the operation
             self.complete_operation_by_match(op_type, seq_num)
@@ -161,6 +323,25 @@ class localComm:
         else:
             raise ValueError("Operation not found in pending operations.")
 
+    def add_proxy_print(self, peer: int, channel: int, direction: str, tail: int, recvtail: int, retries: int, collid: int, dtype: int, redop: int, proto: int, nb: int, ns: int, p: int, t: int, r: int, d: int):
+        """Add a proxy print to the communicator.
+        
+        This is used to track stalls in communication across the fabric.
+        """
+        if len(self.pending_operations) != 1:
+            raise ValueError("There should be exactly one pending operation to add a proxy print.")
+        self.pending_operations[0].add_proxy_stall(ProxyStall(channel, peer, direction, tail, recvtail, retries, collid, dtype, redop, proto, nb, ns, p, t, r, d))
+        self.proxy_stall_count += 1
+    
+    def get_proxy_stall_count(self) -> int:
+        """Get the count of proxy stalls associated with this communicator."""
+        return self.proxy_stall_count
+
+    def add_dt_stall(self, channel_id:str, timestamp:float, content:str) -> None:
+        """Add a data transfer stall to the communicator."""
+        if len(self.pending_operations) != 1:
+            raise ValueError("There should be exactly one pending operation to add a data transfer stall.")
+        self.pending_operations[0].add_dt_stall(DTStall(channel_id, timestamp, content))
 
 # We need a class that represents a communicator across the entire system
 # This class should track the individual local communicators and the mapping between the global rank
@@ -179,10 +360,11 @@ class globalComm:
         # a map for both directions
         self.local_to_global_rank_map = {}  # Maps local rank to global rank
         self.global_to_local_rank_map = {}  # Maps global rank to local rank
+        self.size = size  # Size of the communicator
 
     def add_local_communicator(self, local_comm: localComm, global_rank: int):
         """Add a local communicator to the global communicator."""
-        self.local_communicators[local_comm.localId] = local_comm
+        self.local_communicators[local_comm.localRank] = local_comm
         # Update the global rank map
         self.local_to_global_rank_map[local_comm.localRank] = global_rank
         self.global_to_local_rank_map[global_rank] = local_comm.localRank
@@ -233,4 +415,178 @@ class globalComm:
         for i, comm in enumerate(self.local_communicators):
             for j, op in enumerate(comm.completed_operations):
                 if op.duration is not None:
-                    rval[i, j] = op.duration * 1000
+                    rval[i, j] = op.duration
+        
+        return rval
+    
+    def get_completed_operations(self) -> list:
+        """Get a list of all completed operations across all local communicators."""
+        if not self.comm_record_complete():
+            raise ValueError("Communicator is not fully populated with local communicators.")
+        all_completed_ops = [ [ op.op_type for op in comm.completed_operations] for comm in self.local_communicators]
+        all_equal = True
+        for oplist in all_completed_ops:
+            if oplist != all_completed_ops[0]:
+                all_equal = False
+                break
+        assert all_equal, "Not all local communicators have the same completed operations."
+
+        return [ op for op in self.local_communicators[0].completed_operations ]
+
+    def check_consistency(self) -> bool:
+        """Check if all local communicators have the same pending and completed operations, and that the completed operations have the same sequence numbers, counts, and dtypes."""
+        consistent = True
+        if not self.comm_record_complete():
+            raise ValueError("Communicator is not fully populated with local communicators.")
+        pending_counts = self.get_pending_opcounts()
+        if not np.all(pending_counts == pending_counts[0]):
+            consistent = False
+            print("Pending operation counts are not consistent across local communicators.")
+        if not self.same_completed_opcounts():
+            consistent = False
+            print("Completed operation counts are not consistent across local communicators.")
+        for comm in self.local_communicators:
+            for i, op in enumerate(comm.completed_operations):
+                if op.seq_num != self.local_communicators[0].completed_operations[i].seq_num:
+                    consistent = False
+                    print(f"Operation sequence number mismatch in communicator {comm.commId} at rank {i}.")
+                if op.count != self.local_communicators[0].completed_operations[i].count:
+                    consistent = False
+                    print(f"Operation count mismatch in communicator {comm.commId} at rank {i}.")
+                if op.dtype != self.local_communicators[0].completed_operations[i].dtype:
+                    consistent = False
+                    print(f"Operation dtype mismatch in communicator {comm.commId} at rank {i}.")
+        return consistent
+    
+    def get_proxy_stall_counts_on_completed(self) -> np.ndarray:
+        """Get the total count of proxy stalls across all local communicators."""
+        if not self.comm_record_complete():
+            raise ValueError("Communicator is not fully populated with local communicators.")
+        rval = np.zeros((len(self.local_communicators), max(self.get_completed_opcounts())))
+
+        for i, comm in enumerate(self.local_communicators):
+            for j, op in enumerate(comm.completed_operations):
+                rval[i, j] = len(op.proxy_stalls)
+        return rval
+
+    def trace_proxy_stalls(self, algo: str = "Ring") -> None:
+        """Trace proxy stalls across all local communicators."""
+        uncounted_stalls = self.get_proxy_stall_counts_on_completed()
+        if(uncounted_stalls.sum() == 0):
+            print("No proxy stalls to trace.")
+            return
+        completed_ops = self.get_completed_operations()
+        run_once = False
+        while uncounted_stalls.sum() > 0:
+            print(f"Uncounted stalls remaining: {uncounted_stalls.sum()}")
+            print(uncounted_stalls)
+            if run_once:
+                print("Why is this not breaking?")
+                break
+            run_once = True
+            # Find the first uncounted stall
+            starting_rank, op_index = np.argwhere(uncounted_stalls)[0]
+            print(f"Tracing proxy stall in communicator {self.local_communicators[starting_rank].commId} at local rank {starting_rank}, operation index {op_index}.")
+            
+
+            current_rank = None
+            last_rank = None # Track this to make sure we go in the right direction for IPC
+            last_step = None # Track if our last step was an IPC or OFI step
+            last_stall = None # Track the last stall we found, so we can match info on the other side
+            tracing_channel = None  # This will hold the channel we are tracing through
+            # if we loop back around, we need to stop
+            while current_rank != starting_rank:
+                
+
+                # Which channel is used on this local rank
+                local_channel = None
+                
+                # We should expect to search the proxies unless we both come in and leave on an IPC step
+                search_proxy = True
+                # This will hold the stalls we are searching for on this step
+                unique_stalls = []
+
+               # For first iteration we don't need to search for a channel and skip straight to stall searching
+                if current_rank is None:
+                    current_rank = starting_rank
+                    unique_stalls.append(self.local_communicators[current_rank].completed_operations[op_index].proxy_stalls[-1])
+                    last_rank = current_rank
+                    last_stall = unique_stalls[0]
+                    last_step = 'OFI' + ':' + stall.direction  # Assume we came in on an OFI step
+                    current_rank = unique_stalls[0].peer
+                else:
+                    # If last_step was IPC, we won't search proxy output unless our next step is OFI
+                    # So turn the search off for now, and if we find a channel out over OFI we'll check the proxy
+                    if last_step == 'IPC':
+                        search_proxy = False
+                    else:
+                        # If we came in off OFI, we should see if we have a stall from it
+                        for stall in reversed(self.local_communicators[current_rank].completed_operations[op_index].proxy_stalls):
+                            if stall.peer == last_rank and stall.traced is False:
+                                unique_stalls.append(stall)
+                                if stall.recvtail != last_stall.recvtail:
+                                    print(f"Mismatch in recvtail proxy output from rank {last_rank} (Global {self.local_to_global_rank_map[last_rank]}) on rank {current_rank} (Global {self.local_to_global_rank_map[current_rank]}).")
+                                    print(f"Global communicator {self.commId} operation {completed_ops[op_index].op_type} seq_num {completed_ops[op_index].seq_num}.")
+                                    print(f"Rank {current_rank} Tail: {stall.tail}, Recvtail: {stall.recvtail}, Retries: {stall.retries}, Collid: {stall.collid}, Dtype: {stall.dtype}, Redop: {stall.redop}, Protocol: {stall.protocol}, Nb: {stall.nb}, Ns: {stall.ns}, P: {stall.p}, T: {stall.t}, R: {stall.r}, D: {stall.d}")
+                                    print(f"Rank {last_rank} Tail: {last_stall.tail}, Recvtail: {last_stall.recvtail}, Retries: {last_stall.retries}, Collid: {last_stall.collid}, Dtype: {last_stall.dtype}, Redop: {last_stall.redop}, Protocol: {last_stall.protocol}, Nb: {last_stall.nb}, Ns: {last_stall.ns}, P: {last_stall.p}, T: {last_stall.t}, R: {last_stall.r}, D: {last_stall.d}")
+                                break
+    
+                    # Search channels to find the one we came in on
+                    # We need to look for a channel that has two peers, otherwise it can't be traced
+                    channel_list = self.local_communicators[current_rank].ring_channels if algo == "Ring" else self.local_communicators[current_rank].tree_channels
+                    for channel in channel_list:
+                        if len(channel.peers) < 2:
+                            continue
+                        for peer in channel.peers:
+                            if peer.peer_id == last_rank and peer.peer_type == last_step:
+                                # We found the peer we came from, so now pick our channel
+                                local_channel = channel
+                                break
+                        if local_channel is not None:
+                            break
+                    if local_channel is None:
+                        raise ValueError(f"Could not find channel on rank {current_rank} for {last_step} step from rank {last_rank} of type {last_step}.")
+                    for stall in unique_stalls:
+                        # If we had a proxy stall matching the last peer, its channel ID should match the one we found by searching channels for the peer
+                        if stall.channel_id != local_channel.channel_num:
+                            raise ValueError(f"Stall channel ID {stall.channel_id} does not match local channel {local_channel.channel_num} on rank {current_rank}.")
+                    
+                    # Now find where we are going next               
+                    for peer in local_channel.peers:
+                        print(local_channel)
+                        # Find the next peer in the channel
+                        if peer.peer_id != last_rank:
+                            # If the next step on our channel is an IPC step, we should just take it and leave the proxy output
+                            # for a different ring
+                            if peer.peer_type == 'IPC':
+                                last_rank = current_rank
+                                current_rank = peer.peer_id
+                                last_step = 'IPC'
+                                break
+                            elif peer.peer_type == 'OFI':
+                                # If the next step is an OFI step, we should check if we have a stall to trace
+                                search_proxy = True
+                                last_rank = current_rank
+                                last_step = 'OFI'
+                                current_rank = peer.peer_id
+                                for stall in reversed(self.local_communicators[last_rank].completed_operations[op_index].proxy_stalls):
+                                    if stall.peer == current_rank and stall.traced is False:
+                                        unique_stalls.append(stall)
+                                        break
+                                break
+
+                print(f"Stepping to rank {current_rank} (Global {self.local_to_global_rank_map[current_rank]}) from rank {last_rank} (Global {self.local_to_global_rank_map[last_rank]}).")
+                if not search_proxy:
+                    continue
+
+                # At this point, "last_rank" is the rank we're currently on, and "current_rank" is the rank we're going to next
+                for stall in self.local_communicators[last_rank].completed_operations[op_index].proxy_stalls:
+                    if stall.traced:
+                        continue
+                    for ustall in unique_stalls:
+                        if stall.peer == ustall.peer and stall.direction == ustall.direction and stall.channel_id == ustall.channel_id:
+                            # This stall is redundant. Collapse into the last stall
+                            stall.traced = True
+                            uncounted_stalls[last_rank, op_index] -= 1
+                            if stall.tail != ustall.tail:
+                                print(f"Rank {last_rank} tail changed from {ustall.tail} to {stall.tail}. It's not stalled, just slow.")
