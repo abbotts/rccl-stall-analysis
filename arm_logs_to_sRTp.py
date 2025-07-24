@@ -13,6 +13,7 @@ def main():
     parser.add_argument("-o", "--output", type=str, required=True, help="Output pickle to store the parsed information.")
     parser.add_argument("-p", "--pattern", type=str, default='rank-*.out', help="Pattern, as a shell glob, to match rank files.")
     parser.add_argument("-v", "--verbose", action='store_true', help="Enable verbose output.")
+    parser.add_argument("--strict", action='store_true', help="Enable strict mode, which will raise exceptions on parsing errors instead of skipping them.")
     args = parser.parse_args()
 
     verbose = args.verbose

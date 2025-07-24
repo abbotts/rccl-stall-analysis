@@ -13,12 +13,21 @@ ipcPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channe
 ofiPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] [{direction}] via NET/AWS Libfabric/{ofi_details} comm {comm} nRanks {nranks}")
 proxyPattern = parse.compile("{proxy} coll:{collid} comm:{comm} [{direction}] dtype:{dtype} redOp:{redop} proto:{proto}  nb:{nb} ns:{ns} p:{p} t:{t} r:{r}, d:{d}   myrank:{myrank} peer:{peer} chan:{chan} tail:{tail} recvtail:{recvtail} reg:{reg} connSz:{connsz}(retries:{retries})]")
 
-def process_rank_file(rank_file):
+def process_rank_file(rank_file, strict=False):
     """
     Process the rank file to extract NCCL communicator information.
+
+    This function assumes the rank file is from Arm Patinyasakdikul's NCCL tests on Frontier and assume
+    interleaving and the specific types of outputs in those files.
+
+    Currently if it fails to parse a proxy dump line it will print a warning and continue processing the rest of the file.
+    There are often multiple of these. Strict mode will raise an exception instead.
+
+    If any non-proxy dump parse fails it will raise an exception and stop processing the file.
     
     Args:
         rank_file (str): Path to the rank file.
+        strict (bool): If True, raise exceptions on parsing errors instead of skipping them.
     
     Returns:
         list: A list of localComm objects representing the communicators.
@@ -156,26 +165,167 @@ def process_rank_file(rank_file):
                                 if comm.end_kernel_if_match(r['tid'], r['channelid'], r['timestamp']):
                                     if endLogged:
                                         raise ValueError("Ambiguous kernel end: multiple communicators have ops of this type and size pending.")
+                                    #print(f"Logging kernel end for {r['tid']} and channel {r['channelid']} on communicator {comm.commId}")
+                                    #print(line)
                                     endLogged = True
                                     continue
                             except Exception as e:
                                 print("Error ending kernel operation on line:")
                                 print(line.strip())
                                 raise e
+                if not endLogged:
+                    print(f"Bad line: {line.strip()}", file=sys.stderr)
+                    for comm in communicators:
+                        print(f"Communicator {comm.commId}, size {comm.size} has {len(comm.pending_operations)} pending operations.")
+                        for op in comm.pending_operations:
+                            print(f"\tPending Operation: {op.op_type} Seq Num: {op.seq_num}")
+                    raise ValueError(f"Kernel end for tid {r['tid']} and channelid {r['channelid']} did not match any pending operations.")
 
             # A proxy print looks like this:
             # 0x7ff5ee771d48 [0-1|0| coll:3 comm:0x1b885440 [SEND] dtype:9 redOp:0 proto:2  nb:1048576 ns:16380 p:4436 t:4428 r:0, d:4428   myrank:6 peer:10 chan:1 tail:4428 recvtail:4428 reg:0 connSz:-1(retries:265446404)]
             if "recvtail" in line and "myrank" in line:
                 r = proxyPattern.parse(line.strip())
-                #print(line.strip())
-                #print(r)
+                # Proxy print lines get broken *a lot*, so let's gracefully fail unless we've been told to be strict
+                if r is None:
+                    if strict:
+                        raise ValueError(f"Failed to parse proxy print line: {line.strip()}")
+                    else:
+                        print(f"WARNING: Failed to parse proxy print line: {line.strip()}", file=sys.stderr)
+                        continue
                 for comm in communicators:
                     if comm.localId == r['comm']:
-                        comm.add_proxy_print(int(r['peer']), int(r['chan']), r['direction'], int(r['tail']), int(r['recvtail']), int(r['retries']), int(r['collid']), int(r['dtype']), int(r['redop']), int(r['proto']), int(r['nb']), int(r['ns']), int(r['p']), int(r['t']), int(r['r']), int(r['d']))
+                        comm.add_proxy_print(int(r['peer']), int(r['chan']),
+                                             r['direction'], int(r['tail']),
+                                             int(r['recvtail']), int(r['retries']),
+                                             int(r['collid']), int(r['dtype']),
+                                             int(r['redop']), int(r['proto']),
+                                             int(r['nb']), int(r['ns']),
+                                             int(r['p']), int(r['t']),
+                                             int(r['r']), int(r['d']),
+                                             line.strip())
                         continue
 
     return communicators
 
+def cleanup_file(input_path, output_path, unique_string):
+    """Process an input file to make sure it can be read by process_rank_file.
+    
+    Arguments:
+        input_path (str): Path to the input file to be cleaned up.
+        output_path (str): Path to the output file where cleaned content will be written.
+        unique_string (str): A string that should only occur at the start of a line,
+
+    The unique string should be something like a node name that will only appear once per line (if at all).
+    We'll use that to detect skipped new lines and automatically correct them.
+
+    After automatically correcting any indentation issues, we'll try to parse following the same rules as process_rank_file.
+    If a parse fails we'll try any easy corrections we can think of from past experiences.
+    If those don't work, we'll print the file name, line number, and the line itself to stderr and continue processing the rest of the file.
+
+    """
+    with open(input_path, 'r') as file:
+        lines = file.readlines()
+
+    with open(output_path, 'w') as file:
+        for lnum, line in enumerate(lines):
+            towrite = []
+            # Check if the string "frontier" occurs more than once in the line
+            if line.count(unique_string) > 1:
+                # If it does, we will insert a newline before the second occurrence
+                parts = line.split(unique_string)
+                # Write the first part, then a newline, then the second part with "frontier" re-added
+                for part in parts:
+                    towrite.append(unique_string + part + "\n")
+            # if line doesn't start with the unique string but contains it,
+            # we will insert a newline before the first occurrence
+            elif "NCCL INFO" in line and not line.startswith(unique_string):
+                parts = line.split(unique_string, 1)
+                # Write the first part, then a newline, then the second part with "frontier" re-added
+                towrite.append(parts[0] + "\n")
+                towrite.append(unique_string + parts[1])
+                #print(towrite)
+            else:
+                # line is clean, write it as is
+                towrite.append(line)
+            
+            def print_failure(example):
+                print("***********************", file=sys.stderr)
+                print(f"Error parsing line {lnum} in {input_path}:", file=sys.stderr)
+                print(f"Got: \n{line.strip()}", file=sys.stderr)
+                print(f"Expected something like: \n{example}", file=sys.stderr)
+
+            for il, lw in enumerate(towrite):
+                # Comm Init Lines look like this:
+                example = "frontier00061:695134:695340 [0] NCCL INFO ncclCommInitRank comm 0x9bf11c0 rank 0 nranks 4096 cudaDev 0 nvmlDev 4 busId d1000 commId 0xf4592124255ac8f2 - Init START"
+                if "ncclCommInitRank" in lw and "Init START" in lw:
+                    r = initPattern.parse(lw.strip())
+                    if r is None:
+                        print_failure(example)
+                        continue
+            
+                # Channel lines look like this:
+                # frontier00061:695135:695311 [0] NCCL INFO Channel 03/0 : 0[d6000] -> 2[de000] via P2P/IPC comm 0x9bbf3b0 nRanks 4096
+                # frontier00061:695135:695311 [0] NCCL INFO Channel 00/0 : 4092[d6000] -> 0[d6000] [receive] via NET/AWS Libfabric/2/GDRDMA comm 0x9bbf3b0 nRanks 4096
+                if "Channel" in line:
+                    if "P2P/IPC" in lw:
+                        channel_info = ipcPattern.parse(lw.strip())
+                        if channel_info is None:
+                            print_failure("frontier00061:695135:695311 [0] NCCL INFO Channel 03/0 : 0[d6000] -> 2[de000] via P2P/IPC comm 0x9bbf3b0 nRanks 4096")
+                            continue
+                    elif "NET/AWS Libfabric" in lw:
+                        channel_info = ofiPattern.parse(lw.strip())
+                        if channel_info is None:
+                            print_failure("frontier00061:695135:695311 [0] NCCL INFO Channel 00/0 : 4092[d6000] -> 0[d6000] [receive] via NET/AWS Libfabric/2/GDRDMA comm 0x9bbf3b0 nRanks 4096")
+                            continue
+                
+                # Comm Init Complete Lines look like this:
+                # frontier00061:695135:695311 [0] NCCL INFO ncclCommInitRank comm 0x9bbf3b0 rank 0 nranks 4096 cudaDev 0 nvmlDev 5 busId d6000 commId 0xbc8a3ad231751b7 localSize 304 used 227459488 bytes on core 13 - Init COMPLETE
+                if "Init COMPLETE" in line:
+                    # We need to find the communicator that matches the localcomm and globalcomm
+                    r = initCompletePattern.parse(lw.strip())
+                    if r is None:
+                        print_failure("frontier00061:695135:695311 [0] NCCL INFO ncclCommInitRank comm 0x9bbf3b0 rank 0 nranks 4096 cudaDev 0 nvmlDev 5 busId d6000 commId 0xbc8a3ad231751b7 localSize 304 used 227459488 bytes on core 13 - Init COMPLETE")
+                        continue
+                
+                # Operation starts look like this:
+                # frontier00061:695135:695135 [0] NCCL INFO AllGather: opCount 2 sendbuff 0x7ffc62d00000 recvbuff 0x7ff887600000 count 131072 datatype 9 op 0 root 0 comm 0x9bbf3b0 [nranks=4096] stream 0x90013c0 task 0 globalrank 0
+                if "opCount" in lw and "comm" in lw:
+                    r = opLaunchPattern.parse(lw.strip())
+                    if r is None:
+                        print_failure("frontier00061:695135:695135 [0] NCCL INFO AllGather: opCount 2 sendbuff 0x7ffc62d00000 recvbuff 0x7ff887600000 count 131072 datatype 9 op 0 root 0 comm 0x9bbf3b0 [nranks=4096] stream 0x90013c0 task 0 globalrank 0")
+                        continue
+            
+                # Kernel launches look like this:
+                # frontier00061:695135:695318 [0] NCCL INFO ## [442464.629746] [00:00:00] 000000 KL HWID 42302510 ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 nw 4 bi 0 nc 8 root 0 busId d6000 nRanks 4096
+                if "ncclDevFunc_" in line and "KL" in line:
+                    r = kernelLaunchPattern.parse(line.strip())
+                    if r is None:
+                        print_failure("frontier00061:695135:695318 [0] NCCL INFO ## [442464.629746] [00:00:00] 000000 KL HWID 42302510 ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 nw 4 bi 0 nc 8 root 0 busId d6000 nRanks 4096")
+                        continue
+                
+                #kernel end lines look like this:
+                # frontier00061:695135:695522 [0] NCCL INFO ## [442510.054859] [00:00:00] 000000 KE busId d6000 nRanks 4096
+                if "KE" in lw and "busId" in lw:
+                    r = kernelEndPattern.parse(lw.strip())
+                    if r is None:
+                        print_failure("frontier00061:695135:695522 [0] NCCL INFO ## [442510.054859] [00:00:00] 000000 KE busId d6000 nRanks 4096")
+                        continue
+                
+                # A proxy print looks like this:
+                # 0x7ff5ee771d48 [0-1|0| coll:3 comm:0x1b885440 [SEND] dtype:9 redOp:0 proto:2  nb:1048576 ns:16380 p:4436 t:4428 r:0, d:4428   myrank:6 peer:10 chan:1 tail:4428 recvtail:4428 reg:0 connSz:-1(retries:265446404)]
+                if "recvtail" in lw and "myrank" in lw:
+                    r = proxyPattern.parse(lw.strip())
+                    if r is None:
+                        # I have often seen a missing closing bracket in the proxy print, so we will try to fix that
+                        if not lw.strip().endswith("]"):
+                            towrite[il] = lw.strip() + "]" + "\n"
+                        r = proxyPattern.parse(towrite[il].strip())
+                    # If we still can't parse it, print an error
+                    if r is None:
+                        print_failure("0x7ff5ee771d48 [0-1|0| coll:3 comm:0x1b885440 [SEND] dtype:9 redOp:0 proto:2  nb:1048576 ns:16380 p:4436 t:4428 r:0, d:4428   myrank:6 peer:10 chan:1 tail:4428 recvtail:4428 reg:0 connSz:-1(retries:265446404)]")
+                    continue
+            file.writelines(towrite)
+            
 def main():
     from argparse import ArgumentParser
 

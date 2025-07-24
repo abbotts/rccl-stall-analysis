@@ -21,7 +21,7 @@ class ProxyStall:
     We'll associate these with specific operations, not with specific channels, so we can trace the communication
     in an operation that is stalled.
     """
-    def __init__(self, channel_id: str, peer: int, direction: str, tail: int, recvtail: int, retries: int, collid: int, dtype: int, redop: int, protocol: int, nb: int, ns: int, p: int, t: int, r: int, d: int):
+    def __init__(self, channel_id: str, peer: int, direction: str, tail: int, recvtail: int, retries: int, collid: int, dtype: int, redop: int, protocol: int, nb: int, ns: int, p: int, t: int, r: int, d: int, contextstr: str):
         self.channel_id = channel_id  # The ID of the channel where the stall occurred
         self.peer = peer # The peer we were talking to
         self.direction = direction # send or receive
@@ -40,6 +40,9 @@ class ProxyStall:
         self.d = d # no clue what this is, ask Arm or check source
         # This tracks if we have traced this stall or not
         self.traced = False
+        self.contextstr = contextstr  # A string to help us trace this stall in the logs, if needed
+    def __repr__(self):
+        return self.contextstr
 
 class DTStall:
     # This represents a print from the kernel associated with a channel saying it is stalled
@@ -126,7 +129,7 @@ class Operation:
         self.proxy_stalls = []  # List of proxy stalls associated with this operation instance
         self.dt_stalls = []  # List of data transfer stalls associated with this operation instance
     def __repr__(self):
-        if self.duration > 0:
+        if self.duration is not None and self.duration > 0:
             duration_str = f"{self.duration} ms"
         else:
             duration_str = "unknown duration"
@@ -323,14 +326,14 @@ class localComm:
         else:
             raise ValueError("Operation not found in pending operations.")
 
-    def add_proxy_print(self, peer: int, channel: int, direction: str, tail: int, recvtail: int, retries: int, collid: int, dtype: int, redop: int, proto: int, nb: int, ns: int, p: int, t: int, r: int, d: int):
+    def add_proxy_print(self, peer: int, channel: int, direction: str, tail: int, recvtail: int, retries: int, collid: int, dtype: int, redop: int, proto: int, nb: int, ns: int, p: int, t: int, r: int, d: int, content: str) -> None:
         """Add a proxy print to the communicator.
         
         This is used to track stalls in communication across the fabric.
         """
         if len(self.pending_operations) != 1:
             raise ValueError("There should be exactly one pending operation to add a proxy print.")
-        self.pending_operations[0].add_proxy_stall(ProxyStall(channel, peer, direction, tail, recvtail, retries, collid, dtype, redop, proto, nb, ns, p, t, r, d))
+        self.pending_operations[0].add_proxy_stall(ProxyStall(channel, peer, direction, tail, recvtail, retries, collid, dtype, redop, proto, nb, ns, p, t, r, d, content))
         self.proxy_stall_count += 1
     
     def get_proxy_stall_count(self) -> int:
@@ -479,11 +482,6 @@ class globalComm:
         run_once = False
         while uncounted_stalls.sum() > 0:
             print(f"Uncounted stalls remaining: {uncounted_stalls.sum()}")
-            print(uncounted_stalls)
-            if run_once:
-                print("Why is this not breaking?")
-                break
-            run_once = True
             # Find the first uncounted stall
             starting_rank, op_index = np.argwhere(uncounted_stalls)[0]
             print(f"Tracing proxy stall in communicator {self.local_communicators[starting_rank].commId} at local rank {starting_rank}, operation index {op_index}.")
@@ -497,10 +495,6 @@ class globalComm:
             # if we loop back around, we need to stop
             while current_rank != starting_rank:
                 
-
-                # Which channel is used on this local rank
-                local_channel = None
-                
                 # We should expect to search the proxies unless we both come in and leave on an IPC step
                 search_proxy = True
                 # This will hold the stalls we are searching for on this step
@@ -512,8 +506,10 @@ class globalComm:
                     unique_stalls.append(self.local_communicators[current_rank].completed_operations[op_index].proxy_stalls[-1])
                     last_rank = current_rank
                     last_stall = unique_stalls[0]
-                    last_step = 'OFI' + ':' + stall.direction  # Assume we came in on an OFI step
+                    last_step = 'OFI'  # We're here because we saw an OFI stall
                     current_rank = unique_stalls[0].peer
+                    tracing_channel = unique_stalls[0].channel_id
+                    print(f"Stall on channel {tracing_channel}")
                 else:
                     # If last_step was IPC, we won't search proxy output unless our next step is OFI
                     # So turn the search off for now, and if we find a channel out over OFI we'll check the proxy
@@ -524,58 +520,73 @@ class globalComm:
                         for stall in reversed(self.local_communicators[current_rank].completed_operations[op_index].proxy_stalls):
                             if stall.peer == last_rank and stall.traced is False:
                                 unique_stalls.append(stall)
+                                assert stall.channel_id == tracing_channel, f"Stall channel ID {stall.channel_id} does not match tracing channel {tracing_channel} on rank {current_rank}."
                                 if stall.recvtail != last_stall.recvtail:
                                     print(f"Mismatch in recvtail proxy output from rank {last_rank} (Global {self.local_to_global_rank_map[last_rank]}) on rank {current_rank} (Global {self.local_to_global_rank_map[current_rank]}).")
                                     print(f"Global communicator {self.commId} operation {completed_ops[op_index].op_type} seq_num {completed_ops[op_index].seq_num}.")
-                                    print(f"Rank {current_rank} Tail: {stall.tail}, Recvtail: {stall.recvtail}, Retries: {stall.retries}, Collid: {stall.collid}, Dtype: {stall.dtype}, Redop: {stall.redop}, Protocol: {stall.protocol}, Nb: {stall.nb}, Ns: {stall.ns}, P: {stall.p}, T: {stall.t}, R: {stall.r}, D: {stall.d}")
-                                    print(f"Rank {last_rank} Tail: {last_stall.tail}, Recvtail: {last_stall.recvtail}, Retries: {last_stall.retries}, Collid: {last_stall.collid}, Dtype: {last_stall.dtype}, Redop: {last_stall.redop}, Protocol: {last_stall.protocol}, Nb: {last_stall.nb}, Ns: {last_stall.ns}, P: {last_stall.p}, T: {last_stall.t}, R: {last_stall.r}, D: {last_stall.d}")
-                                break
-    
-                    # Search channels to find the one we came in on
-                    # We need to look for a channel that has two peers, otherwise it can't be traced
-                    channel_list = self.local_communicators[current_rank].ring_channels if algo == "Ring" else self.local_communicators[current_rank].tree_channels
-                    for channel in channel_list:
-                        if len(channel.peers) < 2:
-                            continue
-                        for peer in channel.peers:
-                            if peer.peer_id == last_rank and peer.peer_type == last_step:
-                                # We found the peer we came from, so now pick our channel
-                                local_channel = channel
-                                break
-                        if local_channel is not None:
-                            break
-                    if local_channel is None:
-                        raise ValueError(f"Could not find channel on rank {current_rank} for {last_step} step from rank {last_rank} of type {last_step}.")
-                    for stall in unique_stalls:
-                        # If we had a proxy stall matching the last peer, its channel ID should match the one we found by searching channels for the peer
-                        if stall.channel_id != local_channel.channel_num:
-                            raise ValueError(f"Stall channel ID {stall.channel_id} does not match local channel {local_channel.channel_num} on rank {current_rank}.")
-                    
-                    # Now find where we are going next               
-                    for peer in local_channel.peers:
-                        print(local_channel)
-                        # Find the next peer in the channel
-                        if peer.peer_id != last_rank:
-                            # If the next step on our channel is an IPC step, we should just take it and leave the proxy output
-                            # for a different ring
-                            if peer.peer_type == 'IPC':
-                                last_rank = current_rank
-                                current_rank = peer.peer_id
-                                last_step = 'IPC'
-                                break
-                            elif peer.peer_type == 'OFI':
-                                # If the next step is an OFI step, we should check if we have a stall to trace
-                                search_proxy = True
-                                last_rank = current_rank
-                                last_step = 'OFI'
-                                current_rank = peer.peer_id
-                                for stall in reversed(self.local_communicators[last_rank].completed_operations[op_index].proxy_stalls):
-                                    if stall.peer == current_rank and stall.traced is False:
-                                        unique_stalls.append(stall)
-                                        break
+                                    #print(f"Rank {current_rank} Tail: {stall.tail}, Recvtail: {stall.recvtail}, Retries: {stall.retries}, Collid: {stall.collid}, Dtype: {stall.dtype}, Redop: {stall.redop}, Protocol: {stall.protocol}, Nb: {stall.nb}, Ns: {stall.ns}, P: {stall.p}, T: {stall.t}, R: {stall.r}, D: {stall.d}")
+                                    #print(f"Rank {last_rank} Tail: {last_stall.tail}, Recvtail: {last_stall.recvtail}, Retries: {last_stall.retries}, Collid: {last_stall.collid}, Dtype: {last_stall.dtype}, Redop: {last_stall.redop}, Protocol: {last_stall.protocol}, Nb: {last_stall.nb}, Ns: {last_stall.ns}, P: {last_stall.p}, T: {last_stall.t}, R: {last_stall.r}, D: {last_stall.d}")
+                                    print(last_stall)
+                                    print(stall)
                                 break
 
-                print(f"Stepping to rank {current_rank} (Global {self.local_to_global_rank_map[current_rank]}) from rank {last_rank} (Global {self.local_to_global_rank_map[last_rank]}).")
+    
+                    channel_list = self.local_communicators[current_rank].ring_channels if algo == "Ring" else self.local_communicators[current_rank].tree_channels
+
+                    # This is a bunch of logic for searching channels based on peers
+                    # I don't think we need this, and we're going to try just tracing the channel instead
+                    if False:
+                        # Search channels to find the one we came in on
+                        # We need to look for a channel that has two peers, otherwise it can't be traced
+                        for channel in channel_list:
+                            if len(channel.peers) < 2:
+                                continue
+                            for peer in channel.peers:
+                                if peer.peer_id == last_rank and peer.peer_type == last_step:
+                                    # We found the peer we came from, so now pick our channel
+                                    local_channel = channel
+                                    break
+                            if local_channel is not None:
+                                break
+                        if local_channel is None:
+                            raise ValueError(f"Could not find channel on rank {current_rank} for {last_step} step from rank {last_rank} of type {last_step}.")
+                        for stall in unique_stalls:
+                            # If we had a proxy stall matching the last peer, its channel ID should match the one we found by searching channels for the peer
+                            if stall.channel_id != local_channel.channel_num:
+                                raise ValueError(f"Stall channel ID {stall.channel_id} does not match local channel {local_channel.channel_num} on rank {current_rank}.")
+                    
+                    # This logic to figure out where we're going is valid even if we're using a fixed channel
+                    local_channel = channel_list[tracing_channel]              
+                    for peer in local_channel.peers:
+                        #print(local_channel)
+
+                        # As long as we're tracing in the send direction, the only time
+                        # the rank we came from should be logged as a peer is if it's an OFI receive peer
+                        if peer.peer_id == last_rank:
+                            assert peer.peer_type == "OFI" and peer.peer_direction == 'receive', f"Peer {peer.peer_id} on rank {current_rank} is not an OFI receive peer, but is the last rank we came from."
+                            continue
+
+                        # If the next step on our channel is an IPC step, we should just take it and leave the proxy output
+                        # for a different ring
+                        if peer.peer_type == 'IPC':
+                            last_rank = current_rank
+                            current_rank = peer.peer_id
+                            last_step = 'IPC'
+                            break
+                        elif peer.peer_type == 'OFI':
+                            # If the next step is an OFI step, we should check if we have a stall to trace
+                            search_proxy = True
+                            last_rank = current_rank
+                            last_step = 'OFI'
+                            current_rank = peer.peer_id
+                            for stall in reversed(self.local_communicators[last_rank].completed_operations[op_index].proxy_stalls):
+                                if stall.peer == current_rank and stall.traced is False:
+                                    unique_stalls.append(stall)
+                                    last_stall = stall
+                                    break
+                            break
+
+                #print(f"Stepping to rank {current_rank} (Global {self.local_to_global_rank_map[current_rank]}) from rank {last_rank} (Global {self.local_to_global_rank_map[last_rank]}).")
                 if not search_proxy:
                     continue
 
