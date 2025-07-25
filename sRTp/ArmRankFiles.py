@@ -1,6 +1,6 @@
 #! /usr/bin/env python3
 
-import sRTp.analysisTypes as analysisTypes
+import sRTp.ncclTypes as ncclTypes
 import parse
 import sys
 
@@ -41,7 +41,7 @@ def process_rank_file(rank_file, strict=False):
             # frontier00061:695134:695340 [0] NCCL INFO ncclCommInitRank comm 0x9bf11c0 rank 0 nranks 4096 cudaDev 0 nvmlDev 4 busId d1000 commId 0xf4592124255ac8f2 - Init START
             if "ncclCommInitRank" in line and "Init START" in line:
                 r = initPattern.parse(line.strip())
-                comm = analysisTypes.localComm(r['node'], r['globalcomm'], r['localcomm'], r['rank'], r['size'], r['busid'], r['cudadev'], r['nvmldev'])
+                comm = ncclTypes.localComm(r['node'], r['globalcomm'], r['localcomm'], r['rank'], r['size'], r['busid'], r['cudadev'], r['nvmldev'])
                 commOpening = r['localcomm']
                 for ecomm in communicators:
                     assert ecomm.commId != comm.commId, f"Duplicate communicator ID found: {comm.commId}"

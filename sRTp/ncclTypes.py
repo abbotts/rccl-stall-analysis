@@ -42,7 +42,7 @@ class ProxyStall:
         self.traced = False
         self.contextstr = contextstr  # A string to help us trace this stall in the logs, if needed
     def __repr__(self):
-        return self.contextstr
+        return self.contextstr + f"Traced: {self.traced}"
 
 class DTStall:
     # This represents a print from the kernel associated with a channel saying it is stalled
@@ -326,6 +326,13 @@ class localComm:
         else:
             raise ValueError("Operation not found in pending operations.")
 
+    def get_operation(self, seq_num: int) -> Operation:
+        """Get an operation by its sequence number."""
+        for operation in self.pending_operations + self.completed_operations:
+            if operation.seq_num == seq_num:
+                return operation
+        raise IndexError(f"Operation with sequence number {seq_num} not found.")
+    
     def add_proxy_print(self, peer: int, channel: int, direction: str, tail: int, recvtail: int, retries: int, collid: int, dtype: int, redop: int, proto: int, nb: int, ns: int, p: int, t: int, r: int, d: int, content: str) -> None:
         """Add a proxy print to the communicator.
         
@@ -395,12 +402,27 @@ class globalComm:
             raise ValueError("Communicator is not fully populated with local communicators.")
         return np.array([len(comm.completed_operations) for comm in self.local_communicators])
     
+    def get_opcounts(self) -> np.ndarray:
+        """Get the number of pending and completed operations across all local communicators as a numpy array."""
+        if not self.comm_record_complete():
+            raise ValueError("Communicator is not fully populated with local communicators.")
+        pending_counts = self.get_pending_opcounts()
+        completed_counts = self.get_completed_opcounts()
+        return pending_counts + completed_counts
+    
     def same_completed_opcounts(self) -> bool:
         """Check if all local communicators have the same number of completed operations."""
         if not self.comm_record_complete():
             raise ValueError("Communicator is not fully populated with local communicators.")
         completed_counts = self.get_completed_opcounts()
         return np.all(completed_counts == completed_counts[0])
+
+    def same_opcounts(self) -> bool:
+        """Check if all local communicators have the same number of pending and completed operations."""
+        if not self.comm_record_complete():
+            raise ValueError("Communicator is not fully populated with local communicators.")
+        opcounts = self.get_opcounts()
+        return np.all(opcounts == opcounts[0])
 
     def get_completed_durations(self, fillMissing: bool = False) -> np.ndarray:
         """Get the durations of completed operations across all local communicators as a numpy array.
@@ -432,22 +454,67 @@ class globalComm:
             if oplist != all_completed_ops[0]:
                 all_equal = False
                 break
-        assert all_equal, "Not all local communicators have the same completed operations."
+        if not all_equal:
+            raise ValueError("Not all local communicators have the same completed operations.")
 
         return [ op for op in self.local_communicators[0].completed_operations ]
+
+    def get_operations(self, allowUneven: bool = False) -> list:
+        """Get a list of all operations (pending and completed) across all local communicators."""
+        if not self.comm_record_complete():
+            raise ValueError("Communicator is not fully populated with local communicators.")
+        all_ops = [ comm.completed_operations + comm.pending_operations for comm in self.local_communicators ]
+        all_ops_types = [ [ op.getOperationType() for op in ops ] for ops in all_ops ]
+        all_equal = True
+        for oplist in all_ops_types:
+            if oplist != all_ops_types[0]:
+                all_equal = False
+                break
+        if not all_equal:
+            if allowUneven:
+                print("Warning: Not all local communicators have the same operations. Returning operations from the first communicator.")
+            else:
+                raise ValueError("Not all local communicators have the same operations.")
+
+        return [ op for op in all_ops[0] ]
 
     def check_consistency(self) -> bool:
         """Check if all local communicators have the same pending and completed operations, and that the completed operations have the same sequence numbers, counts, and dtypes."""
         consistent = True
         if not self.comm_record_complete():
             raise ValueError("Communicator is not fully populated with local communicators.")
+        total_counts = self.get_opcounts()
+        if not np.all(total_counts == total_counts[0]):
+            consistent = False
+            print("Operation counts are not consistent across local communicators.")
+            unique, counts = np.unique(total_counts, return_counts=True)
+            for i, unique in enumerate(unique):
+                print(f"Operation count {unique} appears {counts[i]} times.")
+                if counts[i] < 10:
+                    print(f"\tLocal ranks: {np.argwhere(total_counts == unique).flatten()}")
+                    print(f"\tGlobal ranks: {[self.local_to_global_rank_map[r] for r in np.argwhere(total_counts == unique).flatten()]}")
+
         pending_counts = self.get_pending_opcounts()
         if not np.all(pending_counts == pending_counts[0]):
             consistent = False
             print("Pending operation counts are not consistent across local communicators.")
+            unique, counts, = np.unique(pending_counts, return_counts=True)
+            for i, unique in enumerate(unique):
+                print(f"Pending operation count {unique} appears {counts[i]} times.")
+                if counts[i] < 10:
+                    print(f"\tLocal ranks: {np.argwhere(pending_counts == unique).flatten()}")
+                    print(f"\tGlobal ranks: {[self.local_to_global_rank_map[r] for r in np.argwhere(pending_counts == unique).flatten()]}")
+
         if not self.same_completed_opcounts():
             consistent = False
             print("Completed operation counts are not consistent across local communicators.")
+            unique, counts = np.unique(self.get_completed_opcounts(), return_counts=True)
+            for i, unique in enumerate(unique):
+                print(f"Completed operation count {unique} appears {counts[i]} times.")
+                if counts[i] < 10:
+                    print(f"\tLocal ranks: {np.argwhere(self.get_completed_opcounts() == unique).flatten()}")
+                    print(f"\tGlobal ranks: {[self.local_to_global_rank_map[r] for r in np.argwhere(self.get_completed_opcounts() == unique).flatten()]}")
+
         for comm in self.local_communicators:
             for i, op in enumerate(comm.completed_operations):
                 if op.seq_num != self.local_communicators[0].completed_operations[i].seq_num:
@@ -461,8 +528,8 @@ class globalComm:
                     print(f"Operation dtype mismatch in communicator {comm.commId} at rank {i}.")
         return consistent
     
-    def get_proxy_stall_counts_on_completed(self) -> np.ndarray:
-        """Get the total count of proxy stalls across all local communicators."""
+    def get_proxy_stall_counts_on_completed_operations(self) -> np.ndarray:
+        """Get the total count of proxy stalls across all local communicators on completed operations."""
         if not self.comm_record_complete():
             raise ValueError("Communicator is not fully populated with local communicators.")
         rval = np.zeros((len(self.local_communicators), max(self.get_completed_opcounts())))
@@ -472,18 +539,49 @@ class globalComm:
                 rval[i, j] = len(op.proxy_stalls)
         return rval
 
-    def trace_proxy_stalls(self, algo: str = "Ring") -> None:
+    def get_proxy_stall_counts_on_operations(self) -> np.ndarray:
+        """Get the total count of proxy stalls across all local communicators on operations."""
+        if not self.comm_record_complete():
+            raise ValueError("Communicator is not fully populated with local communicators.")
+        rval = np.zeros((len(self.local_communicators), max(self.get_opcounts())))
+
+        for i, comm in enumerate(self.local_communicators):
+            for j, op in enumerate(comm.completed_operations + comm.pending_operations):
+                rval[i, j] = len(op.proxy_stalls)
+        return rval
+
+    def get_proxy_stall_counts(self) -> np.ndarray:
+        """Get the total count of proxy stalls across all local communicators."""
+        if not self.comm_record_complete():
+            raise ValueError("Communicator is not fully populated with local communicators.")
+        rval = np.zeros(len(self.local_communicators))
+
+        for i, comm in enumerate(self.local_communicators):
+            rval[i] = comm.get_proxy_stall_count()
+        return rval
+    
+
+    def trace_proxy_stalls(self, algo: str = "Ring", allowUneven: bool = False) -> None:
         """Trace proxy stalls across all local communicators."""
-        uncounted_stalls = self.get_proxy_stall_counts_on_completed()
+        if allowUneven:
+            print("Warning: Tracing proxy stalls with allowUneven=True is a bit unpredictable and may miss stalls.")
+        uncounted_stalls = self.get_proxy_stall_counts_on_operations()
         if(uncounted_stalls.sum() == 0):
             print("No proxy stalls to trace.")
             return
-        completed_ops = self.get_completed_operations()
-        run_once = False
+        all_ops = self.get_operations(allowUneven=allowUneven)
+
+        last_uncounted_stalls = 0
         while uncounted_stalls.sum() > 0:
+            if last_uncounted_stalls == uncounted_stalls.sum():
+                print("No progress made in tracing proxy stalls, exiting to avoid infinite loop.")
+                break
+            last_uncounted_stalls = uncounted_stalls.sum()
             print(f"Uncounted stalls remaining: {uncounted_stalls.sum()}")
             # Find the first uncounted stall
+            #print(np.argwhere(uncounted_stalls))
             starting_rank, op_index = np.argwhere(uncounted_stalls)[0]
+            #print(uncounted_stalls)
             print(f"Tracing proxy stall in communicator {self.local_communicators[starting_rank].commId} at local rank {starting_rank}, operation index {op_index}.")
             
 
@@ -493,9 +591,15 @@ class globalComm:
             last_stall = None # Track the last stall we found, so we can match info on the other side
             tracing_channel = None  # This will hold the channel we are tracing through
             # if we loop back around, we need to stop
-            while current_rank != starting_rank:
-                
-                # We should expect to search the proxies unless we both come in and leave on an IPC step
+            searching = True
+            while searching:
+
+                # Python doesn't have a do-while loop, so we need to use a while loop with a break
+                # that will terminate on this condition *after* doing the proxy search
+                if current_rank == starting_rank:
+                    searching = False
+
+                # We should expect to search the proxies unless we both come in on an IPC step
                 search_proxy = True
                 # This will hold the stalls we are searching for on this step
                 unique_stalls = []
@@ -503,13 +607,31 @@ class globalComm:
                # For first iteration we don't need to search for a channel and skip straight to stall searching
                 if current_rank is None:
                     current_rank = starting_rank
-                    unique_stalls.append(self.local_communicators[current_rank].completed_operations[op_index].proxy_stalls[-1])
+                    for stall in reversed(self.local_communicators[current_rank].get_operation(op_index).proxy_stalls):
+                        if stall.traced is False:
+                            unique_stalls.append(stall)
+                            break
                     last_rank = current_rank
-                    last_stall = unique_stalls[0]
-                    last_step = 'OFI'  # We're here because we saw an OFI stall
-                    current_rank = unique_stalls[0].peer
                     tracing_channel = unique_stalls[0].channel_id
-                    print(f"Stall on channel {tracing_channel}")
+
+                    if stall.direction == 'RECV':
+                        # Everything is setup to follow the send direction and process recieves when we
+                        # arrive on a rank, so if we are a recieve then we should just immediately move on
+                        # to the send direction and our stall will be traced when we arrive back here.
+                        for peer in self.local_communicators[last_rank].ring_channels[tracing_channel].peers:
+                            if peer.peer_id != stall.peer:
+                                last_step = peer.peer_type
+                                current_rank = peer.peer_id
+                                unique_stalls.remove(stall)
+                                if last_step == 'IPC':
+                                    search_proxy = False
+                                break
+                    else:
+                        last_stall = unique_stalls[0]
+                        current_rank = unique_stalls[0].peer
+                        last_step = 'OFI'
+
+                    print(f"Stall on channel {tracing_channel} starting on rank {last_rank} (Global {self.local_to_global_rank_map[last_rank]}).")
                 else:
                     # If last_step was IPC, we won't search proxy output unless our next step is OFI
                     # So turn the search off for now, and if we find a channel out over OFI we'll check the proxy
@@ -517,20 +639,33 @@ class globalComm:
                         search_proxy = False
                     else:
                         # If we came in off OFI, we should see if we have a stall from it
-                        for stall in reversed(self.local_communicators[current_rank].completed_operations[op_index].proxy_stalls):
-                            if stall.peer == last_rank and stall.traced is False:
-                                unique_stalls.append(stall)
-                                assert stall.channel_id == tracing_channel, f"Stall channel ID {stall.channel_id} does not match tracing channel {tracing_channel} on rank {current_rank}."
-                                if stall.recvtail != last_stall.recvtail:
-                                    print(f"Mismatch in recvtail proxy output from rank {last_rank} (Global {self.local_to_global_rank_map[last_rank]}) on rank {current_rank} (Global {self.local_to_global_rank_map[current_rank]}).")
-                                    print(f"Global communicator {self.commId} operation {completed_ops[op_index].op_type} seq_num {completed_ops[op_index].seq_num}.")
-                                    #print(f"Rank {current_rank} Tail: {stall.tail}, Recvtail: {stall.recvtail}, Retries: {stall.retries}, Collid: {stall.collid}, Dtype: {stall.dtype}, Redop: {stall.redop}, Protocol: {stall.protocol}, Nb: {stall.nb}, Ns: {stall.ns}, P: {stall.p}, T: {stall.t}, R: {stall.r}, D: {stall.d}")
-                                    #print(f"Rank {last_rank} Tail: {last_stall.tail}, Recvtail: {last_stall.recvtail}, Retries: {last_stall.retries}, Collid: {last_stall.collid}, Dtype: {last_stall.dtype}, Redop: {last_stall.redop}, Protocol: {last_stall.protocol}, Nb: {last_stall.nb}, Ns: {last_stall.ns}, P: {last_stall.p}, T: {last_stall.t}, R: {last_stall.r}, D: {last_stall.d}")
-                                    print(last_stall)
-                                    print(stall)
-                                break
+                        try:
+                            for stall in reversed(self.local_communicators[current_rank].get_operation(op_index).proxy_stalls):
+                                if stall.peer == last_rank and stall.traced is False and stall.channel_id == tracing_channel:
+                                    unique_stalls.append(stall)
+                                    #assert stall.channel_id == tracing_channel, f"Stall channel ID {stall.channel_id} does not match tracing channel {tracing_channel} on rank {current_rank}."
+                                    if last_stall is None:
+                                        print("**********************************")
+                                        print(f"Rank {current_rank} (Global {self.local_to_global_rank_map[current_rank]}) found stall on channel {stall.channel_id} from rank {last_rank} (Global {self.local_to_global_rank_map[last_rank]}), but there was no stall on the sender side to match.")
+                                        print(f"Global communicator {self.commId} operation {all_ops[op_index].op_type} seq_num {all_ops[op_index].seq_num}.")
+                                        for lproxy in self.local_communicators[last_rank].get_operation(op_index).proxy_stalls:
+                                            print(lproxy)
+                                        continue
+                                    if stall.recvtail != last_stall.recvtail:
+                                        print(f"Mismatch in recvtail proxy output from rank {last_rank} (Global {self.local_to_global_rank_map[last_rank]}) on rank {current_rank} (Global {self.local_to_global_rank_map[current_rank]}).")
+                                        print(f"Global communicator {self.commId} operation {all_ops[op_index].op_type} seq_num {all_ops[op_index].seq_num}.")
+                                        #print(f"Rank {current_rank} Tail: {stall.tail}, Recvtail: {stall.recvtail}, Retries: {stall.retries}, Collid: {stall.collid}, Dtype: {stall.dtype}, Redop: {stall.redop}, Protocol: {stall.protocol}, Nb: {stall.nb}, Ns: {stall.ns}, P: {stall.p}, T: {stall.t}, R: {stall.r}, D: {stall.d}")
+                                        #print(f"Rank {last_rank} Tail: {last_stall.tail}, Recvtail: {last_stall.recvtail}, Retries: {last_stall.retries}, Collid: {last_stall.collid}, Dtype: {last_stall.dtype}, Redop: {last_stall.redop}, Protocol: {last_stall.protocol}, Nb: {last_stall.nb}, Ns: {last_stall.ns}, P: {last_stall.p}, T: {last_stall.t}, R: {last_stall.r}, D: {last_stall.d}")
+                                        print(last_stall)
+                                        print(stall)
+                                    break
+                        except IndexError:
+                            search_proxy = False
+                            print(f"!!!!WARNING!!!:Operation with index {op_index} does not exist on rank {current_rank} (Global {self.local_to_global_rank_map[current_rank]}).")
+                            print(f"This explains the stall from rank {last_rank} (Global {self.local_to_global_rank_map[last_rank]}) to rank {current_rank} (Global {self.local_to_global_rank_map[current_rank]}).")
+                            print(last_stall)
+                            print(f"Skipping and moving along channel.")
 
-    
                     channel_list = self.local_communicators[current_rank].ring_channels if algo == "Ring" else self.local_communicators[current_rank].tree_channels
 
                     # This is a bunch of logic for searching channels based on peers
@@ -572,6 +707,7 @@ class globalComm:
                             last_rank = current_rank
                             current_rank = peer.peer_id
                             last_step = 'IPC'
+                            last_stall = None
                             break
                         elif peer.peer_type == 'OFI':
                             # If the next step is an OFI step, we should check if we have a stall to trace
@@ -579,19 +715,44 @@ class globalComm:
                             last_rank = current_rank
                             last_step = 'OFI'
                             current_rank = peer.peer_id
-                            for stall in reversed(self.local_communicators[last_rank].completed_operations[op_index].proxy_stalls):
-                                if stall.peer == current_rank and stall.traced is False:
-                                    unique_stalls.append(stall)
-                                    last_stall = stall
-                                    break
+                            last_stall = None
+                            try:
+                                for stall in reversed(self.local_communicators[last_rank].get_operation(op_index).proxy_stalls):
+                                    if stall.peer == current_rank and stall.traced is False and stall.channel_id == tracing_channel:
+                                        unique_stalls.append(stall)
+                                        last_stall = stall
+                                        break
+                            except IndexError:
+                                # We don't have this operation
+                                search_proxy = False
+                                last_stall = ProxyStall(
+                                    channel_id=tracing_channel,
+                                    peer=current_rank,
+                                    direction='send',
+                                    tail=0,
+                                    recvtail=0,
+                                    retries=0,
+                                    collid=0,
+                                    dtype=0,
+                                    redop=0,
+                                    protocol=0,
+                                    nb=0,
+                                    ns=0,
+                                    p=0,
+                                    t=0,
+                                    r=0,
+                                    d=0,
+                                    contextstr="Fake proxy stall! No operation found for this rank!"
+                                )
+                                pass
                             break
-
+                
                 #print(f"Stepping to rank {current_rank} (Global {self.local_to_global_rank_map[current_rank]}) from rank {last_rank} (Global {self.local_to_global_rank_map[last_rank]}).")
                 if not search_proxy:
                     continue
 
                 # At this point, "last_rank" is the rank we're currently on, and "current_rank" is the rank we're going to next
-                for stall in self.local_communicators[last_rank].completed_operations[op_index].proxy_stalls:
+                for stall in self.local_communicators[last_rank].get_operation(op_index).proxy_stalls:
                     if stall.traced:
                         continue
                     for ustall in unique_stalls:

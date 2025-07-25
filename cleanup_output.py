@@ -1,6 +1,7 @@
 #! /usr/bin/env python3
 import os
 import sRTp
+import sRTp.ArmRankFiles
 
 
 def main():
@@ -14,7 +15,7 @@ def main():
     if not os.path.exists(outpath):
         os.makedirs(outpath)
     for filename in os.listdir(args.directory):
-        sRTp.rankProcessor.cleanup_file(os.path.join(args.directory, filename), os.path.join(outpath, filename), args.unique)
+        sRTp.ArmRankFiles.cleanup_file(os.path.join(args.directory, filename), os.path.join(outpath, filename), args.unique)
         #print(f"File {filename} has been cleaned up.")
 
 if __name__ == "__main__":
