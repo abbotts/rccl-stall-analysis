@@ -39,10 +39,17 @@ def main():
     biggest = sorted(comms_by_len.keys(), reverse=True)[0]
 
     for comm_id in comms_by_len[biggest]:
+        print(f"\nAnalyzing communicator {comm_id} of size {biggest}.")
         print("\n##########################################\n")
         print(f"Communicator {comm_id} has size {biggest}.")
         comm = communicators[comm_id]
-        print(f"Consistent: {comm.check_consistency()}")
+        try:
+            print(f"Consistent: {comm.check_consistency()}")
+        except Exception as e:
+            print(f"Error checking consistency: {e}", file=sys.stderr)
+            print(f"Analysis on this communicator is unlikely to succeed, skipping.", file=sys.stderr)
+            print(f"(Please let Steve know if you see this message.)")
+            continue
         print("\n")
         print(f"{comm.get_completed_opcounts()[0]} Operations completed and pending (nans suggest pending):")
         durations = comm.get_completed_durations(fillMissing=True)
@@ -67,7 +74,7 @@ def main():
             stalls = comm.get_proxy_stall_counts().sum()
             if stalls > 0:
                 print(f"Proxy stalls detected: {stalls}")
-                comm.trace_proxy_stalls()
+                comm.trace_proxy_stalls(allowUneven=True)
                 print("Proxy stall analysis complete.")
             else:
                 print("No proxy stalls detected.")
