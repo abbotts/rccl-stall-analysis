@@ -459,6 +459,21 @@ class globalComm:
 
         return [ op for op in self.local_communicators[0].completed_operations ]
 
+    def get_pending_operations(self) -> list:
+        """Get a list of all pending operations across all local communicators."""
+        if not self.comm_record_complete():
+            raise ValueError("Communicator is not fully populated with local communicators.")
+        all_pending_ops = [ [ op.op_type for op in comm.pending_operations] for comm in self.local_communicators]
+        all_equal = True
+        for oplist in all_pending_ops:
+            if oplist != all_pending_ops[0]:
+                all_equal = False
+                break
+        if not all_equal:
+            raise ValueError("Not all local communicators have the same pending operations.")
+
+        return [ op for op in self.local_communicators[0].pending_operations ]
+    
     def get_operations(self, allowUneven: bool = False) -> list:
         """Get a list of all operations (pending and completed) across all local communicators."""
         if not self.comm_record_complete():
