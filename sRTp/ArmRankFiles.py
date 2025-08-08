@@ -4,8 +4,8 @@ import sRTp.ncclTypes as ncclTypes
 import parse
 import sys
 
-initPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRank comm {localcomm} rank {rank} nranks {size} cudaDev {cudadev} nvmlDev {nvmldev} busId {busid} commId {globalcomm} - Init START")
-initCompletePattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRank comm {localcomm} rank {rank} nranks {size} cudaDev {cudadev} nvmlDev {nvmldev} busId {busid} commId {globalcomm} localSize {localsize} used {usedbytes} bytes on core {core} - Init COMPLETE")
+initPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRank{impl} comm {localcomm} rank {rank} nranks {size} cudaDev {cudadev} nvmlDev {nvmldev} busId {busid} commId {globalcomm} - Init START")
+initCompletePattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRank{impl} comm {localcomm} rank {rank} nranks {size} cudaDev {cudadev} nvmlDev {nvmldev} busId {busid} commId {globalcomm}{usage}- Init COMPLETE")
 opLaunchPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO {op}: opCount {opcount} sendbuff {sendbuff} recvbuff {recvbuff} count {count} datatype {datatype} op {opnum} root {root} comm {comm} [nranks={nranks}] stream {stream} task {task} globalrank {globalrank}")
 kernelLaunchPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} ncclDevFunc_{func}_{type}_{dtype} nw {nw} bi {bi} nc {nc} root {root} busId {busid} nRanks {nranks}")
 kernelEndPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE busId {busid} nRanks {nranks}")
@@ -207,7 +207,7 @@ def process_rank_file(rank_file, strict=False):
 
     return communicators
 
-def cleanup_file(input_path, output_path, unique_string):
+def cleanup_file(input_path, output_path, unique_string, truncate=False):
     """Process an input file to make sure it can be read by process_rank_file.
     
     Arguments:
@@ -227,7 +227,44 @@ def cleanup_file(input_path, output_path, unique_string):
         lines = file.readlines()
 
     with open(output_path, 'w') as file:
+        active_ops_lines = []
+        stored_partial = None
         for lnum, line in enumerate(lines):
+            # If there's an ACTIVE OPS print in the line we need to just
+            # run forward and capture all the proxy, storing the contents of the line
+            # before the active opts print, then flush the proxy buffer and then the active ops print
+            #print(f"Processing line {lnum}: {line.strip()}", file=sys.stderr)
+            #if stored_partial is not None:
+                #print(f"Stored Partial Line: {stored_partial.strip()}", file=sys.stderr)
+                #print(f"active_ops_lines: {active_ops_lines}", file=sys.stderr)
+            if "ACTIVE OPS" in line:
+                # If this was the start of a line then we probably didn't interrupt anything,
+                # so we can just continue.
+                if line.startswith("ACTIVE OPS"):
+                    continue
+                if stored_partial is not None:
+                    print(f"Error: Found ACTIVE OPS print in line {lnum} of file {output_path} but there was a partial line stored from before. This is likely a bug in cleanup_output.py.", file=sys.stderr)
+                    raise ValueError("Found ACTIVE OPS print in line but there was a partial line stored from before.")
+                parts = line.split("ACTIVE OPS")
+                stored_partial = parts[0]
+                for part in parts[1:]:
+                    active_ops_lines.append("ACTIVE OPS" + part)
+                continue
+            if stored_partial is not None:
+                if "recvtail" in line or line.startswith("|") or line.startswith("v") or (line.startswith("[") and line.strip().endswith("]")):
+                    active_ops_lines.append(line)
+                    continue
+                elif line.strip() == "" and len(active_ops_lines) > 0:
+                    file.writelines(active_ops_lines)
+                    active_ops_lines = []
+                    continue
+                  #print(f"Stored Partial Line: {stored_partial}", file=sys.stderr)
+                    #print("Writing stored partial line before current line", file=sys.stderr)
+                #print(f"Stored partial line: {stored_partial.strip()}", file=sys.stderr)
+                line = stored_partial + line
+                stored_partial = None
+                #print(f"Writing stored partial line before current line: {line.strip()}", file=sys.stderr)
+
             towrite = []
             # Check if the string "frontier" occurs more than once in the line
             if line.count(unique_string) > 1:
@@ -238,7 +275,7 @@ def cleanup_file(input_path, output_path, unique_string):
                     towrite.append(unique_string + part + "\n")
             # if line doesn't start with the unique string but contains it,
             # we will insert a newline before the first occurrence
-            elif "NCCL INFO" in line and not line.startswith(unique_string):
+            elif unique_string in line and not line.startswith(unique_string):
                 parts = line.split(unique_string, 1)
                 # Write the first part, then a newline, then the second part with "frontier" re-added
                 towrite.append(parts[0] + "\n")
@@ -248,13 +285,18 @@ def cleanup_file(input_path, output_path, unique_string):
                 # line is clean, write it as is
                 towrite.append(line)
             
-            def print_failure(example):
-                print("***********************", file=sys.stderr)
-                print(f"Error parsing line {lnum} in {input_path}:", file=sys.stderr)
-                print(f"Got: \n{line.strip()}", file=sys.stderr)
-                print(f"Expected something like: \n{example}", file=sys.stderr)
-
             for il, lw in enumerate(towrite):
+                def print_failure(example):
+                    if lnum == len(lines) - 1:
+                        towrite[il] = "<DROPPED FOR TRUNCATION>"
+                        if truncate:
+                            return
+                        print(f"This is the last line in the file and probably truncated. Dropping", file=sys.stderr)
+                    print("***********************", file=sys.stderr)
+                    print(f"Error parsing line {lnum} in {input_path}:", file=sys.stderr)
+                    print(f"Got: \n{line.strip()}", file=sys.stderr)
+                    print(f"Expected something like: \n{example}", file=sys.stderr)
+
                 # Comm Init Lines look like this:
                 example = "frontier00061:695134:695340 [0] NCCL INFO ncclCommInitRank comm 0x9bf11c0 rank 0 nranks 4096 cudaDev 0 nvmlDev 4 busId d1000 commId 0xf4592124255ac8f2 - Init START"
                 if "ncclCommInitRank" in lw and "Init START" in lw:

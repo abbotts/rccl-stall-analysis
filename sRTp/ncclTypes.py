@@ -122,9 +122,9 @@ class Operation:
         self.duration = None  # Duration of the operation, if applicable
         self._start_time = None  # Start time of the operation, if applicable
         self._end_time = None  # End time of the operation, if applicable
-        self.expected_kernels = 8  # Expected kernels for this operation, if applicable
+        self.expect_kernels = True  # Whether this will start kernels
         if self.comm.size == 1:
-            self.expected_kernels = 0
+            self.expect_kernels = False
         self.algorithm = algorithm  # Algorithm used for the operation, default is "Ring"
         self.proxy_stalls = []  # List of proxy stalls associated with this operation instance
         self.dt_stalls = []  # List of data transfer stalls associated with this operation instance
@@ -153,7 +153,6 @@ class Operation:
         if channel_id in self.channels:
             raise ValueError("Channel ID already in operation channels.")
         self.channels.append(channel_id)
-        self.expected_kernels -= 1
         if timestamp is not None:
             if self._start_time is None:
                 self._start_time = float(timestamp)
@@ -171,7 +170,7 @@ class Operation:
                 self._end_time = float(timestamp)
             else:
                 self._end_time = max(self._end_time, float(timestamp))
-        if self.channels == [] and self.expected_kernels == 0:
+        if self.channels == [] and self.expect_kernels == 0:
             if self._start_time is not None and self._end_time is not None:
                 self.duration = (self._end_time - self._start_time) * 1000.0
             # If no channels are left, mark the operation as complete
@@ -250,11 +249,17 @@ class localComm:
             direction (str): 'send' or 'receive'.
             peer_type (str): The type of connection (e.g., 'IPC', 'OFI').
         """
-        if channel_num < 0 or channel_num >= len(self.ring_channels):
-            raise ValueError("Channel number out of range.")
+        if channel_num < 0:
+            raise ValueError("Channel number must be non-negative.")
         if algo == "Ring":
+            if channel_num >= len(self.ring_channels):
+                # If we're trying to add a channel above our length then we need to expand the list
+                self.ring_channels.extend([Channel(i, self) for i in range(len(self.ring_channels), channel_num + 1)])
             self.ring_channels[channel_num].add_peer(peer_id, direction, peer_type)
         elif algo == "Tree":
+            if channel_num >= len(self.tree_channels):
+                # If we're trying to add a channel above our length then we need to expand the list
+                self.tree_channels.extend([Channel(i, self) for i in range(len(self.tree_channels), channel_num + 1)])
             self.tree_channels[channel_num].add_peer(peer_id, direction, peer_type)
         else:
             raise ValueError("Unknown algorithm.")
@@ -338,9 +343,11 @@ class localComm:
         
         This is used to track stalls in communication across the fabric.
         """
-        if len(self.pending_operations) != 1:
-            raise ValueError("There should be exactly one pending operation to add a proxy print.")
-        self.pending_operations[0].add_proxy_stall(ProxyStall(channel, peer, direction, tail, recvtail, retries, collid, dtype, redop, proto, nb, ns, p, t, r, d, content))
+        # I would like this to be true but without the kernel logging we may not be able to move operations to completed, so
+        # let's just add prints on the last pending operation at this moment.
+        #if len(self.pending_operations) != 1:
+        #    raise ValueError("There should be exactly one pending operation to add a proxy print.")
+        self.pending_operations[-1].add_proxy_stall(ProxyStall(channel, peer, direction, tail, recvtail, retries, collid, dtype, redop, proto, nb, ns, p, t, r, d, content))
         self.proxy_stall_count += 1
     
     def get_proxy_stall_count(self) -> int:
