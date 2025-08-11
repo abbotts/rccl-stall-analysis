@@ -367,6 +367,7 @@ def cleanup_file(input_path, output_path, unique_string, truncate=False):
                         print_failure("0x7ff5ee771d48 [0-1|0| coll:3 comm:0x1b885440 [SEND] dtype:9 redOp:0 proto:2  nb:1048576 ns:16380 p:4436 t:4428 r:0, d:4428   myrank:6 peer:10 chan:1 tail:4428 recvtail:4428 reg:0 connSz:-1(retries:265446404)]")
                     continue
             file.writelines(towrite)
+        return output_path
             
 def main():
     from argparse import ArgumentParser
