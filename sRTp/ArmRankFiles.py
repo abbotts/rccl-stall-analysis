@@ -8,10 +8,17 @@ initPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRa
 initCompletePattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRank{impl} comm {localcomm} rank {rank} nranks {size} cudaDev {cudadev} nvmlDev {nvmldev} busId {busid} commId {globalcomm}{usage}- Init COMPLETE")
 opLaunchPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO {op}: opCount {opcount} sendbuff {sendbuff} recvbuff {recvbuff} count {count} datatype {datatype} op {opnum} root {root} comm {comm} [nranks={nranks}] stream {stream} task {task} globalrank {globalrank}")
 kernelLaunchPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} ncclDevFunc_{func}_{type}_{dtype} nw {nw} bi {bi} nc {nc} root {root} busId {busid} nRanks {nranks}")
-kernelEndPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE busId {busid} nRanks {nranks}")
+kernelEndPatternOld = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE busId {busid} nRanks {nranks}")
+#frontier03173:323438:323550 [0] NCCL INFO ## [4403068.340611] [01:01-01:40] 000000 KE ncclDevFunc_AllReduce_RING_SIMPLE_Sum_bf16 [01:01-01:40] busId ce000 nRanks 2 td->type:18
+kernelEndPatternNew = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE {kernelname} [{channelid2}] busId {busid} nRanks {nranks} td->type:{td_type}")
 ipcPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] via P2P/IPC comm {comm} nRanks {nranks}")
 ofiPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] [{direction}] via NET/{mechanism}/{ofi_details} comm {comm} nRanks {nranks}")
 proxyPattern = parse.compile("{proxy} coll:{collid} comm:{comm} [{direction}] dtype:{dtype} redOp:{redop} proto:{proto}  nb:{nb} ns:{ns} p:{p} t:{t} r:{r}, d:{d}   myrank:{myrank} peer:{peer} chan:{chan} tail:{tail} recvtail:{recvtail} reg:{reg} connSz:{connsz}(retries:{retries})]")
+
+# "frontier00061:695135:695522 [0] NCCL INFO ## [442510.054859] [00:00:00] 000000 KE busId d6000 nRanks 4096"
+# New RCCL changes this pattern
+kernelEndPattern = kernelEndPatternNew
+kernelEndExample = "frontier03173:323438:323550 [0] NCCL INFO ## [4403068.340611] [01:01-01:40] 000000 KE ncclDevFunc_AllReduce_RING_SIMPLE_Sum_bf16 [01:01-01:40] busId ce000 nRanks 2 td->type:18"
 
 def process_rank_file(rank_file, strict=False):
     """
@@ -350,7 +357,7 @@ def cleanup_file(input_path, output_path, unique_string, truncate=False):
                 if "KE" in lw and "busId" in lw:
                     r = kernelEndPattern.parse(lw.strip())
                     if r is None:
-                        print_failure("frontier00061:695135:695522 [0] NCCL INFO ## [442510.054859] [00:00:00] 000000 KE busId d6000 nRanks 4096")
+                        print_failure(kernelEndExample)
                         continue
                 
                 # A proxy print looks like this:
