@@ -10,7 +10,7 @@ opLaunchPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO {op}: opCo
 kernelLaunchPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} ncclDevFunc_{func}_{type}_{dtype} nw {nw} bi {bi} nc {nc} root {root} busId {busid} nRanks {nranks}")
 kernelEndPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE busId {busid} nRanks {nranks}")
 ipcPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] via P2P/IPC comm {comm} nRanks {nranks}")
-ofiPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] [{direction}] via NET/AWS Libfabric/{ofi_details} comm {comm} nRanks {nranks}")
+ofiPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] [{direction}] via NET/{mechanism}/{ofi_details} comm {comm} nRanks {nranks}")
 proxyPattern = parse.compile("{proxy} coll:{collid} comm:{comm} [{direction}] dtype:{dtype} redOp:{redop} proto:{proto}  nb:{nb} ns:{ns} p:{p} t:{t} r:{r}, d:{d}   myrank:{myrank} peer:{peer} chan:{chan} tail:{tail} recvtail:{recvtail} reg:{reg} connSz:{connsz}(retries:{retries})]")
 
 def process_rank_file(rank_file, strict=False):
@@ -64,7 +64,7 @@ def process_rank_file(rank_file, strict=False):
                             channel_info = ipcPattern.parse(line.strip())
                             # IPC channels are always self to peer, so just grab the dst
                             comm.add_peer_to_channel(int(channel_info['channelid']), int(channel_info['dst']), 'both', 'IPC', algo=algo)
-                        elif "NET/AWS Libfabric" in line:
+                        elif "NET/" in line:
                             channel_info = ofiPattern.parse(line.strip())
                             #print(line.strip())
                             #print(channel_info)
@@ -251,7 +251,7 @@ def cleanup_file(input_path, output_path, unique_string, truncate=False):
                     active_ops_lines.append("ACTIVE OPS" + part)
                 continue
             if stored_partial is not None:
-                if "recvtail" in line or line.startswith("|") or line.startswith("v") or (line.startswith("[") and line.strip().endswith("]")):
+                if "recvtail" in line or line.startswith("|") or line.strip() == "v" or (line.startswith("[") and line.strip().endswith("]")):
                     active_ops_lines.append(line)
                     continue
                 elif line.strip() == "" and len(active_ops_lines) > 0:
@@ -314,7 +314,7 @@ def cleanup_file(input_path, output_path, unique_string, truncate=False):
                         if channel_info is None:
                             print_failure("frontier00061:695135:695311 [0] NCCL INFO Channel 03/0 : 0[d6000] -> 2[de000] via P2P/IPC comm 0x9bbf3b0 nRanks 4096")
                             continue
-                    elif "NET/AWS Libfabric" in lw:
+                    elif "NET/" in lw:
                         channel_info = ofiPattern.parse(lw.strip())
                         if channel_info is None:
                             print_failure("frontier00061:695135:695311 [0] NCCL INFO Channel 00/0 : 4092[d6000] -> 0[d6000] [receive] via NET/AWS Libfabric/2/GDRDMA comm 0x9bbf3b0 nRanks 4096")

@@ -360,6 +360,17 @@ class localComm:
             raise ValueError("There should be exactly one pending operation to add a data transfer stall.")
         self.pending_operations[0].add_dt_stall(DTStall(channel_id, timestamp, content))
 
+    def get_operations(self) -> list:
+        """Get a list of all operations (both pending and completed) associated with this communicator."""
+        return self.pending_operations + self.completed_operations
+
+    def check_sequence_consistency(self) -> bool:
+        """ Check if the sequence number of an operation is the same as its place in the op array."""
+        for i, op in enumerate(self.get_operations()):
+            if op.seq_num != i:
+                return False
+        return True
+
 # We need a class that represents a communicator across the entire system
 # This class should track the individual local communicators and the mapping between the global rank
 # and their local rank in the communicator.
@@ -538,16 +549,36 @@ class globalComm:
                     print(f"\tGlobal ranks: {[self.local_to_global_rank_map[r] for r in np.argwhere(self.get_completed_opcounts() == unique).flatten()]}")
 
         for comm in self.local_communicators:
+            if not comm.check_sequence_consistency():
+                consistent = False
             for i, op in enumerate(comm.completed_operations):
+                if i >= len(self.local_communicators[0].completed_operations):
+                    consistent = False
+                    print(f"Completed operation index {i} out of range in communicator {comm.commId} at rank {comm.localRank}.")
+                    continue
                 if op.seq_num != self.local_communicators[0].completed_operations[i].seq_num:
                     consistent = False
-                    print(f"Operation sequence number mismatch in communicator {comm.commId} at rank {i}.")
+                    print(f"Completed operation sequence number mismatch in communicator {comm.commId} at rank {comm.localRan}.")
                 if op.count != self.local_communicators[0].completed_operations[i].count:
                     consistent = False
-                    print(f"Operation count mismatch in communicator {comm.commId} at rank {i}.")
+                    print(f"Completed operation count mismatch in communicator {comm.commId} at rank {comm.localRan}.")
                 if op.dtype != self.local_communicators[0].completed_operations[i].dtype:
                     consistent = False
-                    print(f"Operation dtype mismatch in communicator {comm.commId} at rank {i}.")
+                    print(f"Completed operation dtype mismatch in communicator {comm.commId} at rank {comm.localRan}.")
+            for i, op in enumerate(comm.pending_operations):
+                if i >= len(self.local_communicators[0].pending_operations):
+                    consistent = False
+                    print(f"Pending operation index {i} out of range in communicator {comm.commId} at rank {comm.localRank}.")
+                    continue
+                if op.seq_num != self.local_communicators[0].pending_operations[i].seq_num:
+                    consistent = False
+                    print(f"Pending operation sequence number mismatch in communicator {comm.commId} at rank {comm.localRank}.")
+                if op.count != self.local_communicators[0].pending_operations[i].count:
+                    consistent = False
+                    print(f"Pending operation count mismatch in communicator {comm.commId} at rank {comm.localRank}.")
+                if op.dtype != self.local_communicators[0].pending_operations[i].dtype:
+                    consistent = False
+                    print(f"Pending operation dtype mismatch in communicator {comm.commId} at rank {comm.localRank}.")
         return consistent
     
     def get_proxy_stall_counts_on_completed_operations(self) -> np.ndarray:
@@ -614,8 +645,9 @@ class globalComm:
             tracing_channel = None  # This will hold the channel we are tracing through
             # if we loop back around, we need to stop
             searching = True
+            steps = 0 # Track the number of steps we have taken
             while searching:
-
+                #print(f"Searched {steps} / {self.size} ranks for stalls.", end='\r')
                 # Python doesn't have a do-while loop, so we need to use a while loop with a break
                 # that will terminate on this condition *after* doing the proxy search
                 if current_rank == starting_rank:
@@ -629,7 +661,7 @@ class globalComm:
                # For first iteration we don't need to search for a channel and skip straight to stall searching
                 if current_rank is None:
                     current_rank = starting_rank
-                    for stall in reversed(self.local_communicators[current_rank].get_operation(op_index).proxy_stalls):
+                    for stall in reversed(self.local_communicators[current_rank].get_operations()[op_index].proxy_stalls):
                         if stall.traced is False:
                             unique_stalls.append(stall)
                             break
@@ -662,7 +694,7 @@ class globalComm:
                     else:
                         # If we came in off OFI, we should see if we have a stall from it
                         try:
-                            for stall in reversed(self.local_communicators[current_rank].get_operation(op_index).proxy_stalls):
+                            for stall in reversed(self.local_communicators[current_rank].get_operations()[op_index].proxy_stalls):
                                 if stall.peer == last_rank and stall.traced is False and stall.channel_id == tracing_channel:
                                     unique_stalls.append(stall)
                                     #assert stall.channel_id == tracing_channel, f"Stall channel ID {stall.channel_id} does not match tracing channel {tracing_channel} on rank {current_rank}."
@@ -784,3 +816,4 @@ class globalComm:
                             uncounted_stalls[last_rank, op_index] -= 1
                             if stall.tail != ustall.tail:
                                 print(f"Rank {last_rank} tail changed from {ustall.tail} to {stall.tail}. It's not stalled, just slow.")
+                            break
