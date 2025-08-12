@@ -7,13 +7,19 @@ import sys
 initPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRank{impl} comm {localcomm} rank {rank} nranks {size} cudaDev {cudadev} nvmlDev {nvmldev} busId {busid} commId {globalcomm} - Init START")
 initCompletePattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRank{impl} comm {localcomm} rank {rank} nranks {size} cudaDev {cudadev} nvmlDev {nvmldev} busId {busid} commId {globalcomm}{usage}- Init COMPLETE")
 opLaunchPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO {op}: opCount {opcount} sendbuff {sendbuff} recvbuff {recvbuff} count {count} datatype {datatype} op {opnum} root {root} comm {comm} [nranks={nranks}] stream {stream} task {task} globalrank {globalrank}")
-kernelLaunchPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} ncclDevFunc_{func}_{type}_{dtype} nw {nw} bi {bi} nc {nc} root {root} busId {busid} nRanks {nranks}")
+kernelLaunchPatternOld = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} ncclDevFunc_{func}_{type}_{dtype} nw {nw} bi {bi} nc {nc} root {root} busId {busid} nRanks {nranks}")
+#frontier01982:435137:435324 [0] NCCL INFO ## [2471868.944734] [893:02-02:c0] 000000 KL ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 [893:02-02:c0] HWID     cd10  nw 4 bi 2 nc 8 root 0 busId c9000 nRanks 4096 td->type:17
+kernelLaunchPatternNew = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} ncclDevFunc_{func}_{type}_{dtype} [{channelid2}] HWID {hwid} nw {nw} bi {bi} nc {nc} root {root} busId {busid} nRanks {nranks} td->type:{td_type}")
 kernelEndPatternOld = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE busId {busid} nRanks {nranks}")
 #frontier03173:323438:323550 [0] NCCL INFO ## [4403068.340611] [01:01-01:40] 000000 KE ncclDevFunc_AllReduce_RING_SIMPLE_Sum_bf16 [01:01-01:40] busId ce000 nRanks 2 td->type:18
 kernelEndPatternNew = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE {kernelname} [{channelid2}] busId {busid} nRanks {nranks} td->type:{td_type}")
 ipcPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] via P2P/IPC comm {comm} nRanks {nranks}")
 ofiPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] [{direction}] via NET/{mechanism}/{ofi_details} comm {comm} nRanks {nranks}")
 proxyPattern = parse.compile("{proxy} coll:{collid} comm:{comm} [{direction}] dtype:{dtype} redOp:{redop} proto:{proto}  nb:{nb} ns:{ns} p:{p} t:{t} r:{r}, d:{d}   myrank:{myrank} peer:{peer} chan:{chan} tail:{tail} recvtail:{recvtail} reg:{reg} connSz:{connsz}(retries:{retries})]")
+
+# New RCCL changes this pattern
+kernelLaunchPattern = kernelLaunchPatternNew
+kernelLaunchExample = "frontier01982:435137:435324 [0] NCCL INFO ## [2471868.944734] [893:02-02:c0] 000000 KL ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 [893:02-02:c0] HWID     cd10  nw 4 bi 2 nc 8 root 0 busId c9000 nRanks 4096 td->type:17"
 
 # "frontier00061:695135:695522 [0] NCCL INFO ## [442510.054859] [00:00:00] 000000 KE busId d6000 nRanks 4096"
 # New RCCL changes this pattern
@@ -349,7 +355,8 @@ def cleanup_file(input_path, output_path, unique_string, truncate=False):
                 if "ncclDevFunc_" in line and "KL" in line:
                     r = kernelLaunchPattern.parse(line.strip())
                     if r is None:
-                        print_failure("frontier00061:695135:695318 [0] NCCL INFO ## [442464.629746] [00:00:00] 000000 KL HWID 42302510 ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 nw 4 bi 0 nc 8 root 0 busId d6000 nRanks 4096")
+                        #print_failure("frontier00061:695135:695318 [0] NCCL INFO ## [442464.629746] [00:00:00] 000000 KL HWID 42302510 ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 nw 4 bi 0 nc 8 root 0 busId d6000 nRanks 4096")
+                        print_failure(kernelLaunchExample)
                         continue
                 
                 #kernel end lines look like this:
