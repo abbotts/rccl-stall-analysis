@@ -3,7 +3,10 @@ import sRTp
 import os
 import sys
 import glob
-import dragon
+try:
+    import dragon
+except ImportError:
+    print("Warning: dragon module not found, some features may not be available.")
 import multiprocessing as mp
 
 
@@ -66,6 +69,17 @@ def main():
         pickle.dump(communicators, f)
     print(f"All communicators saved to {output_file}.")
 
+    for key, comm_ids in comms_by_len.items():
+        size_file = f"_size{key}.".join(output_file.split('.'))
+        print(f"Saving communicators of size {key} to {size_file}...")
+        with open(size_file, 'wb') as f:
+            import pickle
+            size_comms = {}
+            for comm_id in comm_ids:
+                size_comms[comm_id] = communicators[comm_id]
+            pickle.dump(size_comms, f)
+
 if __name__ == "__main__":
-    mp.set_start_method("dragon")
+    if 'dragon' in sys.modules:
+        mp.set_start_method("dragon")
     main()
