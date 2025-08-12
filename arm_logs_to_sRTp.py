@@ -3,6 +3,7 @@ import sRTp
 import os
 import sys
 import glob
+import dragon
 import multiprocessing as mp
 
 
@@ -63,7 +64,8 @@ def main():
     with open(output_file, 'wb') as f:
         import pickle
         pickle.dump(communicators, f)
-    print(f"Communicators saved to {output_file}.")
+    print(f"All communicators saved to {output_file}.")
 
 if __name__ == "__main__":
+    mp.set_start_method("dragon")
     main()
