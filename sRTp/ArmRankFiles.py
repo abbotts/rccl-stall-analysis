@@ -9,7 +9,10 @@ initCompletePattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCo
 opLaunchPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO {op}: opCount {opcount} sendbuff {sendbuff} recvbuff {recvbuff} count {count} datatype {datatype} op {opnum} root {root} comm {comm} [nranks={nranks}] stream {stream} task {task} globalrank {globalrank}")
 kernelLaunchPatternOld = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} ncclDevFunc_{func}_{type}_{dtype} nw {nw} bi {bi} nc {nc} root {root} busId {busid} nRanks {nranks}")
 #frontier01982:435137:435324 [0] NCCL INFO ## [2471868.944734] [893:02-02:c0] 000000 KL ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 [893:02-02:c0] HWID     cd10  nw 4 bi 2 nc 8 root 0 busId c9000 nRanks 4096 td->type:17
-kernelLaunchPatternNew = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} ncclDevFunc_{func}_{type}_{dtype} [{channelid2}] HWID {hwid} nw {nw} bi {bi} nc {nc} root {root} busId {busid} nRanks {nranks} td->type:{td_type}")
+kernelLaunchPatternNew = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {unk2} KL ncclDevFunc_{func}_{type}_{dtype} [{channelid2}] HWID     {hwid} nw {nw} bi {bi} nc {nc} root {root} busId {busid} nRanks {nranks} td->type:{td_type}")
+#frontier04908:2941387:2941576 [0] NCCL INFO ## [4403000.879607] [2140:00-00:00] 000000 KL ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 [2140:00-00:00] HWID     a810  nw 4 bi 0 nc 8 root 0 busId c1000 nRanks 4096 td->type:17
+#Expected something like:
+#frontier01982:435137:435324 [0] NCCL INFO ## [2471868.944734] [893:02-02:c0] 000000 KL ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 [893:02-02:c0] HWID     cd10  nw 4 bi 2 nc 8 root 0 busId c9000 nRanks 4096 td->type:17
 kernelEndPatternOld = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE busId {busid} nRanks {nranks}")
 #frontier03173:323438:323550 [0] NCCL INFO ## [4403068.340611] [01:01-01:40] 000000 KE ncclDevFunc_AllReduce_RING_SIMPLE_Sum_bf16 [01:01-01:40] busId ce000 nRanks 2 td->type:18
 kernelEndPatternNew = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE {kernelname} [{channelid2}] busId {busid} nRanks {nranks} td->type:{td_type}")
