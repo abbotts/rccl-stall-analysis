@@ -31,5 +31,8 @@ def main():
                 print(f"File {result.get()} has been cleaned up.")
 
 if __name__ == "__main__":
-    mp.set_start_method("dragon")
+    try:
+        mp.set_start_method("dragon")
+    except ValueError:
+        print("Dragon failed to initialize. Doing garden mp instead")
     main()
