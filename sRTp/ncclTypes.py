@@ -151,7 +151,9 @@ class Operation:
         elif self.progress_tid != tid:
             raise ValueError("Operation already has a progress thread ID.")
         if channel_id in self.channels:
-            raise ValueError("Channel ID already in operation channels.")
+            #raise ValueError("Channel ID already in operation channels.")
+            print(f"WARNING: Channel ID {channel_id} already in operation channels on TID {tid}")
+            return
         self.channels.append(channel_id)
         if timestamp is not None:
             if self._start_time is None:
@@ -170,7 +172,7 @@ class Operation:
                 self._end_time = float(timestamp)
             else:
                 self._end_time = max(self._end_time, float(timestamp))
-        if self.channels == [] and self.expect_kernels == 0:
+        if self.channels == [] and self.expect_kernels:
             if self._start_time is not None and self._end_time is not None:
                 self.duration = (self._end_time - self._start_time) * 1000.0
             # If no channels are left, mark the operation as complete
@@ -290,25 +292,29 @@ class localComm:
         for operation in self.pending_operations:
             # This assumes we will not have multiple pending operations of the same type on the same communicator
             # If we do, we will need to track the sequence number or some other identifier
-            if kstarted:
-                raise ValueError("Multiple pending operations of the same type on the same communicator.")
+            # Disabling this check. There's a fragility here now, if multiple operations are running on the same communicator at the
+            # same time. But that shouldn't be possible...
+            #if kstarted:
+            #    raise ValueError("Multiple pending operations of the same type on the same communicator.")
             # Here I assume that there will be only one thread watching progress on a given operation
             # If there are multiple threads this will raise an exception
             if operation.getOperationType() == opType:
                 operation.start_kernel(int(tid), channel_id, timestamp)
                 kstarted = True
+                break
             else:
                 print(f"Operation {operation.getOperationType()} does not match {opType}, skipping.")
         return kstarted
 
-    def end_kernel_if_match(self, tid, channel_id, timestamp=None):
+    def end_kernel_if_match(self, tid, channel_id, opType:str, timestamp=None):
         """If the kernel matches an operation on this communicator, end it and return true.
         Otherwise, return false."""
         kend = False
         for operation in self.pending_operations:
             if kend:
-                raise ValueError("Multiple pending operations using the same tid and channel_id on the same communicator.")
-            if operation.progress_tid == int(tid) and channel_id in operation.channels:
+                #raise ValueError("Multiple pending operations using the same tid and channel_id on the same communicator.")
+                break
+            if operation.progress_tid == int(tid) and channel_id in operation.channels and opType == operation.getOperationType():
                 operation.end_kernel(int(tid), channel_id, timestamp)
                 kend = True
             if operation.is_complete():

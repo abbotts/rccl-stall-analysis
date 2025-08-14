@@ -3,6 +3,7 @@
 import sRTp.ncclTypes as ncclTypes
 import parse
 import sys
+import subprocess
 
 initPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRank{impl} comm {localcomm} rank {rank} nranks {size} cudaDev {cudadev} nvmlDev {nvmldev} busId {busid} commId {globalcomm} - Init START")
 initCompletePattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ncclCommInitRank{impl} comm {localcomm} rank {rank} nranks {size} cudaDev {cudadev} nvmlDev {nvmldev} busId {busid} commId {globalcomm}{usage}- Init COMPLETE")
@@ -15,7 +16,7 @@ kernelLaunchPatternNew = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## 
 #frontier01982:435137:435324 [0] NCCL INFO ## [2471868.944734] [893:02-02:c0] 000000 KL ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 [893:02-02:c0] HWID     cd10  nw 4 bi 2 nc 8 root 0 busId c9000 nRanks 4096 td->type:17
 kernelEndPatternOld = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE busId {busid} nRanks {nranks}")
 #frontier03173:323438:323550 [0] NCCL INFO ## [4403068.340611] [01:01-01:40] 000000 KE ncclDevFunc_AllReduce_RING_SIMPLE_Sum_bf16 [01:01-01:40] busId ce000 nRanks 2 td->type:18
-kernelEndPatternNew = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE {kernelname} [{channelid2}] busId {busid} nRanks {nranks} td->type:{td_type}")
+kernelEndPatternNew = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE ncclDevFunc_{func}_{type}_{dtype} [{channelid2}] busId {busid} nRanks {nranks} td->type:{td_type}")
 ipcPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] via P2P/IPC comm {comm} nRanks {nranks}")
 ofiPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] [{direction}] via NET/{mechanism}/{ofi_details} comm {comm} nRanks {nranks}")
 proxyPattern = parse.compile("{proxy} coll:{collid} comm:{comm} [{direction}] dtype:{dtype} redOp:{redop} proto:{proto}  nb:{nb} ns:{ns} p:{p} t:{t} r:{r}, d:{d}   myrank:{myrank} peer:{peer} chan:{chan} tail:{tail} recvtail:{recvtail} reg:{reg} connSz:{connsz}(retries:{retries})]")
@@ -49,10 +50,16 @@ def process_rank_file(rank_file, strict=False):
         list: A list of localComm objects representing the communicators.
     """
     communicators = []
-    
+
+    # Going to try doing this in process
+    kernels = []
     with open(rank_file, 'r') as file:
         commOpening = None
         for line in file:
+            if 'KE' in line or 'KL' in line:
+                kernels.append(line)
+                #continue
+        
             # Comm Init Lines look like this:
             # frontier00061:695134:695340 [0] NCCL INFO ncclCommInitRank comm 0x9bf11c0 rank 0 nranks 4096 cudaDev 0 nvmlDev 4 busId d1000 commId 0xf4592124255ac8f2 - Init START
             if "ncclCommInitRank" in line and "Init START" in line:
@@ -143,60 +150,6 @@ def process_rank_file(rank_file, strict=False):
                         print(f"Communicator {comm.commId}, size {comm.size} has {len(comm.pending_operations)} pending operations.")
                     raise ValueError(f"Operation start for {r['op']} with size {r['nranks']} did not match any communicators.")
             
-            # Kernel launches look like this:
-            # frontier00061:695135:695318 [0] NCCL INFO ## [442464.629746] [00:00:00] 000000 KL HWID 42302510 ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 nw 4 bi 0 nc 8 root 0 busId d6000 nRanks 4096
-            if "ncclDevFunc_" in line and "KL" in line:
-                launchLogged = False
-                r = kernelLaunchPattern.parse(line.strip())
-                for comm in communicators:
-                    if comm.size == int(r['nranks']):
-                        for operation in comm.pending_operations:
-                            if operation.getOperationType() == r['func']:
-                                if launchLogged:
-                                    raise ValueError("Ambiguous kernel launch: multiple communicators have ops of this type and size pending.")
-                            
-                                # Start the kernel operation if it matches an operation on this communicator
-                                if comm.start_kernel_if_match(r['func'], r['tid'], r['channelid'], r['timestamp']):
-                                    launchLogged = True
-                                    continue
-                if not launchLogged:
-                    print(f"Bad line: {line}", file=sys.stderr)
-                    for comm in communicators:
-                        print(f"Communicator {comm.commId}, size {comm.size} has {len(comm.pending_operations)} pending operations.")
-                        for op in comm.pending_operations:
-                            print(f"\tPending Operation: {op.op_type} Seq Num: {op.seq_num}")
-                    raise ValueError(f"Kernel launch for {r['func']} with size {r['nranks']} did not match any pending operations.")
-
-            #kernel end lines look like this:
-            # frontier00061:695135:695522 [0] NCCL INFO ## [442510.054859] [00:00:00] 000000 KE busId d6000 nRanks 4096
-            if "KE" in line and "busId" in line:
-                endLogged = False
-                r = kernelEndPattern.parse(line.strip())
-                for comm in communicators:
-                    if comm.size == int(r['nranks']):
-                        for operation in comm.pending_operations:
-                            # The end kernel logging doesn't give optype or size, so we have to go by
-                            # tid and channelid alone
-                            try:
-                                if comm.end_kernel_if_match(r['tid'], r['channelid'], r['timestamp']):
-                                    if endLogged:
-                                        raise ValueError("Ambiguous kernel end: multiple communicators have ops of this type and size pending.")
-                                    #print(f"Logging kernel end for {r['tid']} and channel {r['channelid']} on communicator {comm.commId}")
-                                    #print(line)
-                                    endLogged = True
-                                    continue
-                            except Exception as e:
-                                print("Error ending kernel operation on line:")
-                                print(line.strip())
-                                raise e
-                if not endLogged:
-                    print(f"Bad line: {line.strip()}", file=sys.stderr)
-                    for comm in communicators:
-                        print(f"Communicator {comm.commId}, size {comm.size} has {len(comm.pending_operations)} pending operations.")
-                        for op in comm.pending_operations:
-                            print(f"\tPending Operation: {op.op_type} Seq Num: {op.seq_num}")
-                    raise ValueError(f"Kernel end for tid {r['tid']} and channelid {r['channelid']} did not match any pending operations.")
-
             # A proxy print looks like this:
             # 0x7ff5ee771d48 [0-1|0| coll:3 comm:0x1b885440 [SEND] dtype:9 redOp:0 proto:2  nb:1048576 ns:16380 p:4436 t:4428 r:0, d:4428   myrank:6 peer:10 chan:1 tail:4428 recvtail:4428 reg:0 connSz:-1(retries:265446404)]
             if "recvtail" in line and "myrank" in line:
@@ -220,6 +173,79 @@ def process_rank_file(rank_file, strict=False):
                                              int(r['r']), int(r['d']),
                                              line.strip())
                         continue
+
+    #print("Sorting kernels")
+    kernels.sort()
+    #print("Sorting done")
+    #with open(rank_file+".kernels", "w") as kfile:
+    #    kfile.writelines(kernels)
+    #return communicators
+    #kfile = open(rank_file+".kernels.shellsort", "r")
+    for line in kernels:
+        # Kernel launches look like this:
+        # frontier00061:695135:695318 [0] NCCL INFO ## [442464.629746] [00:00:00] 000000 KL HWID 42302510 ncclDevFunc_AllGather_RING_SIMPLE_Sum_i8 nw 4 bi 0 nc 8 root 0 busId d6000 nRanks 4096
+        if "ncclDevFunc_" in line and "KL" in line:
+            launchLogged = False
+            r = kernelLaunchPattern.parse(line.strip())
+            if int(r['nranks']) == 2:
+                continue  # Skip 2-rank operations, they are not interesting for our analysis and are causing issues with kernel parsing
+            for comm in communicators:
+                if comm.size == int(r['nranks']):
+                    for operation in comm.pending_operations:
+                        if operation.getOperationType() == r['func']:
+                            if launchLogged:
+                                raise ValueError("Ambiguous kernel launch: multiple communicators have ops of this type and size pending.")
+                        
+                            # Start the kernel operation if it matches an operation on this communicator
+                            if comm.start_kernel_if_match(r['func'], r['tid'], r['channelid'], r['timestamp']):
+                                launchLogged = True
+                                # This just breaks the loop over pending operations in this communicator,
+                                # which should be okay.
+                                break
+            if not launchLogged:
+                print(f"Bad line: {line}", file=sys.stderr)
+                for comm in communicators:
+                    print(f"Communicator {comm.commId}, size {comm.size} has {len(comm.pending_operations)} pending operations.")
+                    for op in comm.pending_operations:
+                        print(f"\tPending Operation: {op.op_type} Seq Num: {op.seq_num}")
+                raise ValueError(f"Kernel launch for {r['func']} with size {r['nranks']} did not match any pending operations.")
+
+        #kernel end lines look like this:
+        # frontier00061:695135:695522 [0] NCCL INFO ## [442510.054859] [00:00:00] 000000 KE busId d6000 nRanks 4096
+        if "KE" in line and "busId" in line:
+            endLogged = False
+            r = kernelEndPattern.parse(line.strip())
+            if int(r['nranks']) == 2:
+                continue  # Skip 2-rank operations, they are not interesting for our analysis and are causing issues with kernel parsing
+
+            for comm in communicators:
+                if comm.size == int(r['nranks']) and endLogged is False:
+                    for operation in comm.pending_operations:
+                        # The end kernel logging doesn't give optype or size, so we have to go by
+                        # tid and channelid alone
+                        try:
+                            if comm.end_kernel_if_match(r['tid'], r['channelid'], r['func'], r['timestamp']):
+                                if endLogged:
+                                    raise ValueError("Ambiguous kernel end: multiple communicators have ops of this type and size pending.")
+                                #print(f"Logging kernel end for {r['tid']} and channel {r['channelid']} on communicator {comm.commId}")
+                                #print(line)
+                                endLogged = True
+                                # If we found the right operation, get out
+                                break
+                        except Exception as e:
+                            print("Error ending kernel operation on line:")
+                            print(line.strip())
+                            raise e
+            if not endLogged:
+                print(f"Bad line: {line.strip()}", file=sys.stderr)
+                for comm in communicators:
+                    print(f"Communicator {comm.commId}, size {comm.size} has {len(comm.pending_operations)} pending operations.")
+                    if comm.size != int(r['nranks']):
+                        continue
+                    for op in comm.pending_operations:
+                        print(f"\tPending Operation: {op.op_type} Seq Num: {op.seq_num}")
+                #raise ValueError(f"Kernel end for tid {r['tid']} and channelid {r['channelid']} operation {r['func']} did not match any pending operations.")
+                print(f"WARNING: Kernel end for tid {r['tid']} and channelid {r['channelid']} operation {r['func']} did not match any pending operations.")
 
     return communicators
 
