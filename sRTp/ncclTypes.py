@@ -241,6 +241,7 @@ class localComm:
         self.pending_operations = []  # List of operations that are pending
         self.completed_operations = []  # List of operations that have been completed
         self.proxy_stall_count = 0  # Count of proxy stalls associated with this communicator
+        self.unmatched_proxies = []  # List of unmatched proxy stalls
 
     def add_peer_to_channel(self, channel_num: int, peer_id: int, direction: str, peer_type: str, algo: str = "Ring"):
         """Add a peer to a channel in this communicator.
@@ -281,6 +282,11 @@ class localComm:
         if self.size == 1:
             # If the communicator size is 1, we can immediately complete the operation
             self.complete_operation_by_match(op_type, seq_num)
+        for ip, unmatched_proxy in enumerate(self.unmatched_proxies):
+            if unmatched_proxy[0] == seq_num:
+                self.pending_operations[-1].add_proxy_stall(unmatched_proxy[1])
+                self.unmatched_proxies.pop(ip)
+            
 
     # For now a channel ID is a string, but once Arm can remind me what they mean, I can make this a more complex type
     def start_kernel_if_match(self, opType:str, tid:str, channel_id:str, timestamp=None):
@@ -344,7 +350,7 @@ class localComm:
                 return operation
         raise IndexError(f"Operation with sequence number {seq_num} not found.")
     
-    def add_proxy_print(self, peer: int, channel: int, direction: str, tail: int, recvtail: int, retries: int, collid: int, dtype: int, redop: int, proto: int, nb: int, ns: int, p: int, t: int, r: int, d: int, content: str) -> None:
+    def add_proxy_print(self, opcountx2:int, peer: int, channel: int, direction: str, tail: int, recvtail: int, retries: int, collid: int, dtype: int, redop: int, proto: int, nb: int, ns: int, p: int, t: int, r: int, d: int, content: str) -> None:
         """Add a proxy print to the communicator.
         
         This is used to track stalls in communication across the fabric.
@@ -353,7 +359,20 @@ class localComm:
         # let's just add prints on the last pending operation at this moment.
         #if len(self.pending_operations) != 1:
         #    raise ValueError("There should be exactly one pending operation to add a proxy print.")
-        self.pending_operations[-1].add_proxy_stall(ProxyStall(channel, peer, direction, tail, recvtail, retries, collid, dtype, redop, proto, nb, ns, p, t, r, d, content))
+        found = False
+        for op in self.pending_operations:
+            if op.seq_num == opcountx2/2: 
+                op.add_proxy_stall(ProxyStall(channel, peer, direction, tail, recvtail, retries, collid, dtype, redop, proto, nb, ns, p, t, r, d, content))
+                found = True
+                break
+        for op in self.completed_operations and not found:
+            if op.seq_num == opcountx2/2: 
+                op.add_proxy_stall(ProxyStall(channel, peer, direction, tail, recvtail, retries, collid, dtype, redop, proto, nb, ns, p, t, r, d, content))
+                found = True
+                break
+        
+        if not found:
+            self.unmatched_proxies.append((opcountx2/2, ProxyStall(channel, peer, direction, tail, recvtail, retries, collid, dtype, redop, proto, nb, ns, p, t, r, d, content)))
         self.proxy_stall_count += 1
     
     def get_proxy_stall_count(self) -> int:

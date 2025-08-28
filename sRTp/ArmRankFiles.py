@@ -19,7 +19,7 @@ kernelEndPatternOld = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{t
 kernelEndPatternNew = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO ## [{timestamp}] [{channelid}] {hwid} KE ncclDevFunc_{func}_{type}_{dtype} [{channelid2}] busId {busid} nRanks {nranks} td->type:{td_type}")
 ipcPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] via P2P/IPC comm {comm} nRanks {nranks}")
 ofiPattern = parse.compile("{node}:{pid}:{tid} [{unk}] NCCL INFO Channel {channelid}/{channelnum} : {src}[{srcbusid}] -> {dst}[{dstbusid}] [{direction}] via NET/{mechanism}/{ofi_details} comm {comm} nRanks {nranks}")
-proxyPattern = parse.compile("{proxy} coll:{collid} comm:{comm} [{direction}] dtype:{dtype} redOp:{redop} proto:{proto}  nb:{nb} ns:{ns} p:{p} t:{t} r:{r}, d:{d}   myrank:{myrank} peer:{peer} chan:{chan} tail:{tail} recvtail:{recvtail} reg:{reg} connSz:{connsz}(retries:{retries})]")
+proxyPattern = parse.compile("{addr} [{dunno}|{opcountx2}| coll:{collid} comm:{comm} [{direction}] dtype:{dtype} redOp:{redop} proto:{proto}  nb:{nb} ns:{ns} p:{p} t:{t} r:{r}, d:{d}   myrank:{myrank} peer:{peer} chan:{chan} tail:{tail} recvtail:{recvtail} reg:{reg} connSz:{connsz}(retries:{retries})]")
 
 # New RCCL changes this pattern
 kernelLaunchPattern = kernelLaunchPatternNew
