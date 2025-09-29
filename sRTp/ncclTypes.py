@@ -110,7 +110,7 @@ class Channel:
 # it should also track the NCCL communicator it is associated with
 
 class Operation:
-    def __init__(self, op_type:str, seq_num:int, count:int, dtype:int, comm, algorithm="Ring"):
+    def __init__(self, op_type:str, seq_num:int, count:int, dtype:int, comm, algorithm="Ring", timestamp=None):
         self.op_type = op_type
         self.seq_num = seq_num
         self.count = count
@@ -120,7 +120,7 @@ class Operation:
         self.progress_tid = None
         self.channels = []  # List of channels this operation is monitoring
         self.duration = None  # Duration of the operation, if applicable
-        self._start_time = None  # Start time of the operation, if applicable
+        self._start_time = timestamp  # Start time of the operation, if applicable
         self._end_time = None  # End time of the operation, if applicable
         self.expect_kernels = True  # Whether this will start kernels
         if self.comm.size == 1:
@@ -227,7 +227,10 @@ class localComm:
         self.commId = commId
         self.localId = localId
         self.localRank = int(localRank)
-        self.size = int(size)
+        if size is not None:
+            self.size = int(size)
+        else:
+            self.size = None
         self.busID = busID
         self.cudaDev = cudaDev
         self.nvmlDev = nvmlDev
@@ -235,9 +238,9 @@ class localComm:
         self.rings_connected = False  # Whether all rings are connected
         self.tree_connected = False  # Whether all tree channels are connected
         self.tree_channels = []  # List of tree channels this communicator uses
-        if self.size > 1:
-            self.ring_channels = [ Channel(i, self) for i in range(nchannels) ]  # Preallocate 8 channels for ring operations
-            self.tree_channels = [ Channel(i, self) for i in range(nchannels) ]  # Preallocate 8 channels for tree operations
+        #if self.size is not None and self.size > 1:
+        #    self.ring_channels = [ Channel(i, self) for i in range(nchannels) ]  # Preallocate 8 channels for ring operations
+        #    self.tree_channels = [ Channel(i, self) for i in range(nchannels) ]  # Preallocate 8 channels for tree operations
         self.pending_operations = []  # List of operations that are pending
         self.completed_operations = []  # List of operations that have been completed
         self.proxy_stall_count = 0  # Count of proxy stalls associated with this communicator
@@ -275,10 +278,10 @@ class localComm:
         """Mark all tree channels as connected."""
         self.tree_connected = True
 
-    def start_operation(self, op_type, seq_num, count, dtype):
+    def start_operation(self, op_type, seq_num, count, dtype, algorithm="Ring", timestamp=None):
         """Start an operation on this communicator."""
         # This could be a more complex structure to track operations
-        self.pending_operations.append(Operation(op_type, int(seq_num, 16), int(count), int(dtype), self))
+        self.pending_operations.append(Operation(op_type, int(seq_num, 16), int(count), int(dtype), self, algorithm=algorithm, timestamp=timestamp))
         if self.size == 1:
             # If the communicator size is 1, we can immediately complete the operation
             self.complete_operation_by_match(op_type, seq_num)
@@ -327,13 +330,17 @@ class localComm:
                 self.complete_operation(operation)
         return kend
 
-    def complete_operation_by_match(self, op_type, seq_num):
+    def complete_operation_by_match(self, op_type, seq_num, timestamp=None):
         """Complete an operation on this communicator."""
         # This could be a more complex structure to track operations
         for operation in self.pending_operations:
             if operation.op_type == op_type and operation.seq_num == int(seq_num, base=16):
                 self.completed_operations.append(operation)
                 self.pending_operations.remove(operation)
+        if timestamp is not None:
+            operation._end_time = float(timestamp)
+            if operation._start_time is not None:
+                operation.duration = (operation._end_time - operation._start_time) * 1000.0
 
     def complete_operation(self, operation: Operation):
         """Complete an operation on this communicator."""

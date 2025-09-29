@@ -3,3 +3,7 @@
 __pycache__/
 copilot_generated/
 profiler_output/
+profile_fnames/
+profile_final_test/
+*.json
+*.pickle
