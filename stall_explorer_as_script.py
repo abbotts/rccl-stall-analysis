@@ -2,7 +2,7 @@
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
-%matplotlib inline
+#%matplotlib inline
 
 # %%
 # Load the pickled with all the processed data
