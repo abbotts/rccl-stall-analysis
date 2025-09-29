@@ -4,14 +4,28 @@ The project will attempt to parse log files from multiple processes across multi
 
 ## Prerequisites
 
-You need a reasonably modern python with these two extra packages installed:
+You need a reasonably modern python with these extra packages installed:
 
 - numpy
 - parse
+- matplotlib (required only for stall_explorer)
+- plotly (required only for stall_explorer)
+- seaborn (required only for stall explorer)
+- dragonhpc (recommended on a cluster that supports it)
 
 On Frontier `module load cray-python` should have numpy but you'll need to install parse through pip. I suggest just activating the venv you use for other testing and loading it into there.
 
-## Workflow
+## Workflow for profiler logs
+
+Profiler output is much more structured and easy to parse. After collecting data, just run:
+
+```
+python profiler_logs_to_sRTp.py -d <path_to_data>  -o <output-pickle>
+```
+
+Note that this assumes you used my varient of the profiler plugin that does better file names, which you probably don't. I'll get that up soon.
+
+## Workflow for log parsing (deprecated)
 
 
 The basic workflow is as follows. Details on each step are below.
