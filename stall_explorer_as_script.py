@@ -2,7 +2,6 @@
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
-#%matplotlib inline
 
 # %%
 # Load the pickled with all the processed data
@@ -354,7 +353,6 @@ global_comms['0xc0a6e4e99db3f284'].get_completed_durations()
 import matplotlib.pyplot as plt
 import seaborn as sns
 sns.set_context("notebook")
-%matplotlib inline
 
 # %%
 def plot_op_times(comm, opstart=0, opend=None):
