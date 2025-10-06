@@ -2,10 +2,17 @@
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
+from argparse import ArgumentParser
+
+parser = ArgumentParser()
+parser.add_argument("--input", type=str, required=True)
+parser.add_argument("--output", type=str, required=True)
+
+options = parser.parse_args()
 
 # %%
 # Load the pickled with all the processed data
-global_comms = pickle.load(open("f1024_run3_sockets_size8192.pickle", "rb"))
+global_comms = pickle.load(open(options.input, "rb"))
 
 # %%
 # There should only be one communicator here
@@ -59,7 +66,7 @@ ax.set_ylabel("Duration (ms)")
 ax.set_title("Boxplot of Operation Durations for Reduce-Scatter Size 8192")
 #ax.boxplot(stops)
 
-fig.savefig("rccl_opduration_boxplot_run3_sockets.png")
+fig.savefig(f"rccl_opduration_boxplot_{options.output}.png")
 
 # %% [markdown]
 # # This histogram isn't very useful .. skip it for now
@@ -95,7 +102,7 @@ ax.set_xlabel("Operation Number")
 ax.set_ylabel("Duration (ms)")
 ax.set_title("Distribution of Operation Durations for Reduce-Scatter Size 8192")
 plt.colorbar(p)
-fig.savefig("rccl_opduration_histo_run3_sockets.png")
+fig.savefig(f"rccl_opduration_histo_{options.output}.png")
 # %%
 #truestarts = np.min(starts, axis=0)
 #trueends = np.max(stops, axis=0)
@@ -110,19 +117,19 @@ max_op
 import seaborn as sns
 colors = sns.color_palette("colorblind")
 
-sorted_by_maxop_start = np.argsort(starts[:, max_op])
-nonzero_index = durations[sorted_by_maxop_start, :] > 10
-print(nonzero_index.shape)
+#sorted_by_maxop_start = np.argsort(starts[:, max_op])
+#nonzero_index = durations[sorted_by_maxop_start, :] > 10
+#print(nonzero_index.shape)
 
-fig, ax = plt.subplots(figsize=(120, 60))
-for op in range(durations.shape[1]):
-    ax.plot(starts[sorted_by_maxop_start, op][nonzero_index[:, op]], ls='-', color=colors[op % len(colors)])
-    ax.plot(stops[sorted_by_maxop_start, op][nonzero_index[:, op]], ls='--', color=colors[op % len(colors)])
+#fig, ax = plt.subplots(figsize=(120, 60))
+#for op in range(durations.shape[1]):
+#    ax.plot(starts[sorted_by_maxop_start, op][nonzero_index[:, op]], ls='-', color=colors[op % len(colors)])
+#    ax.plot(stops[sorted_by_maxop_start, op][nonzero_index[:, op]], ls='--', color=colors[op % len(colors)])
 
-ax.set_yticks(np.arange(0,np.max(stops), 24000))
-plt.grid()
-ax.set_xlabel("Rank (sorted by start time of longest op)")
-ax.set_ylabel("Time (ms)")
+#ax.set_yticks(np.arange(0,np.max(stops), 24000))
+#plt.grid()
+#ax.set_xlabel("Rank (sorted by start time of longest op)")
+#ax.set_ylabel("Time (ms)")
 
 # %%
 
@@ -148,7 +155,7 @@ ax.set_ylabel("Time (ms)")
 
 # %%
 # Save at super high resolution
-fig.savefig("rccl_timeline_unsorted_gridlines_run3_sockets.pdf", dpi=300)
+fig.savefig(f"rccl_timeline_unsorted_gridlines_{options.output}.pdf", dpi=300)
 
 # %% [markdown]
 # * STOP HERE *
